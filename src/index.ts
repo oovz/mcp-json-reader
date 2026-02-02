@@ -7,8 +7,9 @@ import {
     ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
-import { readFile } from "fs/promises";
+import { readFile, stat } from "fs/promises";
 import JSONPath from 'jsonpath';
+import path from "path";
 
 /**
  * mcp-json-reader: An MCP server to read and query local JSON files with extended syntax.
@@ -16,12 +17,59 @@ import JSONPath from 'jsonpath';
 
 // --- Helper Functions (Exported for Testing) ---
 
+// --- Configuration and Caching ---
+
+const args = process.argv.slice(2);
+let rootPath = process.env.MCP_JSON_ROOT || "";
+
+for (let i = 0; i < args.length; i++) {
+    if (args[i] === "--root" && args[i + 1]) {
+        rootPath = path.resolve(args[i + 1]);
+        i++;
+    }
+}
+
+interface CacheEntry {
+    data: any;
+    mtime: number;
+}
+
+const jsonCache = new Map<string, CacheEntry>();
+
+export function resolvePath(filePath: string): string {
+    if (path.isAbsolute(filePath)) {
+        return filePath;
+    }
+    if (rootPath) {
+        return path.resolve(rootPath, filePath);
+    }
+    return path.resolve(process.cwd(), filePath);
+}
+
 export async function readJsonFile(filePath: string) {
+    const fullPath = resolvePath(filePath);
     try {
-        const content = await readFile(filePath, "utf-8");
-        return JSON.parse(content);
+        const stats = await stat(fullPath);
+        const mtime = stats.mtimeMs;
+
+        const cached = jsonCache.get(fullPath);
+        if (cached && cached.mtime === mtime) {
+            return cached.data;
+        }
+
+        const content = await readFile(fullPath, "utf-8");
+        const data = JSON.parse(content);
+
+        // Basic LRU-ish cache management
+        if (jsonCache.size >= 10) {
+            const firstKey = jsonCache.keys().next().value;
+            if (firstKey) jsonCache.delete(firstKey);
+        }
+
+        jsonCache.set(fullPath, { data, mtime });
+        return data;
     } catch (error: any) {
-        throw new Error(`Failed to read or parse JSON file at ${filePath}: ${error.message}`);
+        throw new Error(`Failed to read or parse JSON file at ${fullPath}: ${error.message}`);
     }
 }
 
@@ -240,25 +288,40 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         tools: [
             {
                 name: "query",
-                description: "Query a local JSON file with extended JSONPath (sort, sum, math, etc.)",
+                description: "Query a local JSON file using standard JSONPath with custom extensions for sorting, aggregation, math, and string/date manipulation. Supports caching for performance.",
                 inputSchema: {
                     type: "object",
                     properties: {
-                        path: { type: "string" },
-                        jsonPath: { type: "string" }
+                        path: {
+                            type: "string",
+                            description: "Absolute path or path relative to the configured root directory"
+                        },
+                        jsonPath: {
+                            type: "string",
+                            description: "JSONPath expression (e.g. '$.store.book[*].author'). Can include extensions like '.sort(field)', '.sum(field)', '.math(*2)', etc."
+                        }
                     },
                     required: ["path", "jsonPath"],
                 },
             },
             {
                 name: "filter",
-                description: "Filter an array in a local JSON file",
+                description: "Extract and filter elements from an array in a local JSON file using advanced comparison and string matching logic.",
                 inputSchema: {
                     type: "object",
                     properties: {
-                        path: { type: "string" },
-                        jsonPath: { type: "string" },
-                        condition: { type: "string" }
+                        path: {
+                            type: "string",
+                            description: "Absolute path or path relative to the configured root directory"
+                        },
+                        jsonPath: {
+                            type: "string",
+                            description: "JSONPath to the target array (e.g. '$.store.book')"
+                        },
+                        condition: {
+                            type: "string",
+                            description: "Filter condition. Examples: '@.price > 10', '@.category == \"fiction\"', '@.title.contains(\"Lord\")'"
+                        }
                     },
                     required: ["path", "jsonPath", "condition"],
                 },
@@ -325,6 +388,11 @@ async function main() {
     const transport = new StdioServerTransport();
     await server.connect(transport);
     console.error("mcp-json-reader running on stdio");
+    if (rootPath) {
+        console.error(`Root directory: ${rootPath}`);
+    } else {
+        console.error(`Root directory: ${process.cwd()} (default)`);
+    }
 }
 
 main().catch((err) => {

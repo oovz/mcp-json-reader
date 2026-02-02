@@ -1,5 +1,7 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { handleArrayOperations, handleAggregation, handleNumericOperations, handleComplexFilter } from '../src/index.js';
+import { handleArrayOperations, handleAggregation, handleNumericOperations, handleComplexFilter, resolvePath, readJsonFile } from '../src/index.js';
+import path from 'path';
+import { fileURLToPath } from 'url';
 
 describe('mcp-json-reader unit tests', () => {
     const mockBooks = [
@@ -52,5 +54,30 @@ describe('mcp-json-reader unit tests', () => {
         const result = handleComplexFilter(mockBooks, "@.title.contains('Moby')");
         expect(result).toHaveLength(1);
         expect(result[0].title).toBe("Moby Dick");
+    });
+
+    describe('Path Resolution and File Reading', () => {
+        it('resolvePath - absolute', () => {
+            const abs = path.resolve('C:\\test.json');
+            expect(resolvePath(abs)).toBe(abs);
+        });
+
+        it('resolvePath - relative', () => {
+            const rel = 'data.json';
+            const resolved = resolvePath(rel);
+            expect(resolved).toBe(path.resolve(process.cwd(), rel));
+        });
+
+        it('readJsonFile - reads and caches', async () => {
+            const __filename = fileURLToPath(import.meta.url);
+            const __dirname = path.dirname(__filename);
+            const mockJsonPath = path.join(__dirname, 'mock.json');
+
+            const data1 = await readJsonFile(mockJsonPath);
+            expect(data1).toBeDefined();
+
+            const data2 = await readJsonFile(mockJsonPath);
+            expect(data2).toBe(data1); // Should be the exact same object from cache
+        });
     });
 });

@@ -21,23 +21,37 @@ A Model Context Protocol (MCP) server for reading and querying **local** JSON fi
 npm install -g .
 
 # Or run with npx
-npx mcp-json-reader
+npx mcp-json-reader --root /path/to/data
 ```
+
+## Configuration
+
+The server supports a base directory for resolving relative paths.
+
+- **Command Line**: `--root <base_path>`
+- **Environment Variable**: `MCP_JSON_ROOT`
+
+If neither is provided, it defaults to the Current Working Directory (CWD) of the process.
+
+## Performance
+
+- **Caching**: The server implements an in-memory cache for parsed JSON objects. Subsequent queries on the same file are extremely fast as they skip the read and parse steps.
+- **Cache Validation**: It automatically detects file changes using modification timestamps and invalidates the cache when necessary.
 
 ## Tools
 
 ### `query`
-Query a local JSON file using JSONPath syntax with extended operations.
+Query a local JSON file using standard JSONPath with custom extensions for data manipulation.
 - **Arguments**:
-  - `path` (string): Absolute or relative path to the JSON file.
-  - `jsonPath` (string): JSONPath expression (e.g., `$.store.book[*].author`).
+  - `path` (string): Absolute path or path relative to the configured root directory.
+  - `jsonPath` (string): JSONPath expression (e.g., `$.store.book[*].author`). Supports extensions like `.sort()`, `.sum()`, `.math()`, etc.
 
 ### `filter`
-Filter an array within a local JSON file using specific conditions.
+Extract and filter elements from an array within a local JSON file using advanced logic.
 - **Arguments**:
-  - `path` (string): Path to the JSON file.
-  - `jsonPath` (string): Path to the array to filter.
-  - `condition` (string): Condition (e.g., `@.price > 10` or `@.title.contains('Lord')`).
+  - `path` (string): Absolute path or path relative to the configured root directory.
+  - `jsonPath` (string): JSONPath to the array to filter (e.g., `$.store.book`).
+  - `condition` (string): Filter condition (e.g., `@.price > 10` or `@.title.contains('Lord')`).
 
 ## Examples
 
@@ -75,9 +89,10 @@ Add this to your `claude_desktop_config.json`:
   "mcpServers": {
     "json-reader": {
       "command": "npx",
-      "args": ["-y", "mcp-json-reader"],
+      "args": ["-y", "mcp-json-reader", "--root", "/absolute/path/to/your/json/data"],
       "env": {
-        "NODE_ENV": "production"
+        "NODE_ENV": "production",
+        "MCP_JSON_ROOT": "/optional/env/path"
       }
     }
   }
