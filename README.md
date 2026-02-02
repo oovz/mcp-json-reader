@@ -1,5 +1,7 @@
 # MCP JSON Reader (`mcp-json-reader`)
 
+[![npm version](https://img.shields.io/npm/v/mcp-json-reader.svg)](https://www.npmjs.com/package/mcp-json-reader)
+
 A Model Context Protocol (MCP) server for reading and querying **local** JSON files with extended syntax. This tool enables LLMs to perform complex data manipulations directly on local JSON datasets.
 
 ## Features
