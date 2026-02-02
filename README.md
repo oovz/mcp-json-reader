@@ -26,12 +26,12 @@ npx mcp-json-reader --root /path/to/data
 
 ## Configuration
 
-The server supports a base directory for resolving relative paths.
+The server supports an **optional** base directory for resolving relative paths.
 
-- **Command Line**: `--root <base_path>`
-- **Environment Variable**: `MCP_JSON_ROOT`
+- **Command Line**: `--root <base_path>` (Optional)
+- **Environment Variable**: `MCP_JSON_ROOT` (Optional)
 
-If neither is provided, it defaults to the Current Working Directory (CWD) of the process.
+If neither is provided, the server defaults to the Current Working Directory (CWD) of the process. This is useful for IDEs like VSCode or Cursor, where the root path can be set per-workspace.
 
 ## Performance
 
