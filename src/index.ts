@@ -263,7 +263,7 @@ export function handleComplexFilter(data: any[], condition: string): any[] {
 const server = new Server(
     {
         name: "mcp-json-reader",
-        version: "1.1.0"
+        version: "1.1.2"
     },
     {
         capabilities: {

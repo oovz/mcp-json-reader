@@ -93,7 +93,6 @@ Add this to your `claude_desktop_config.json`:
       "command": "npx",
       "args": ["-y", "mcp-json-reader", "--root", "/absolute/path/to/your/json/data"],
       "env": {
-        "NODE_ENV": "production",
         "MCP_JSON_ROOT": "/optional/env/path"
       }
     }
