@@ -35,11 +35,48 @@ The server supports an **optional** base directory for resolving relative paths.
 
 If neither is provided, the server defaults to the Current Working Directory (CWD) of the process. This is useful for IDEs like VSCode or Cursor, where the root path can be set per-workspace.
 
-## Performance
+## Performance & Memory Limits
 
-- **Caching**: The server implements an in-memory cache for parsed JSON objects. Subsequent queries on the same file are extremely fast as they skip the read and parse steps.
-- **Cache Validation**: It automatically detects file changes using modification timestamps and invalidates the cache when necessary.
+### Caching
 
+The server implements an in-memory **LRU cache** (up to 10 entries) for parsed JSON objects. Subsequent queries on the same file are extremely fast as they skip the read and parse steps. The cache automatically detects file changes using modification timestamps and invalidates stale entries.
+
+### V8 Heap Memory Limitation
+
+This server runs on Node.js, which uses the V8 JavaScript engine. V8 imposes a default heap memory limit of approximately **4 GB** on 64-bit systems. This creates a hard upper bound on the size of JSON files that can be safely loaded and queried.
+
+**Why this matters:**
+
+- `JSON.parse()` builds a full in-memory object graph that typically consumes **2–6× the raw file size** in heap memory. A 1 GB JSON file may require 2–6 GB of heap just for the parsed representation.
+- The in-memory cache retains parsed objects for fast re-query, multiplying memory usage by the number of cached files.
+- Query results (sorting, filtering, aggregation) create additional temporary allocations.
+
+**Default safe limit:** The server enforces a maximum file size of **1.5 GB** per file (configurable). On a **16 GB system** with ~4 GB available to V8:
+
+| Raw File Size | Estimated Heap Usage (parsed) | Fits in 4 GB V8 Heap? |
+|--------------|-------------------------------|----------------------|
+| 100 MB       | 200–600 MB                    | Yes                  |
+| 500 MB       | 1–3 GB                        | Usually              |
+| 1 GB         | 2–6 GB                        | Risky                |
+| 1.5 GB       | 3–9 GB                        | At the edge          |
+| 2+ GB        | 4–12 GB                       | No — OOM crash       |
+
+**Tuning the limits:**
+
+```bash
+# Increase V8 heap (e.g., to 8 GB)
+node --max-old-space-size=8192 ./build/index.js
+
+# Increase the file size limit via environment variable (in MB)
+MCP_MAX_FILE_SIZE_MB=2048 npx mcp-json-reader
+```
+
+**Recommendations for large files:**
+
+- For files > 500 MB, monitor memory usage with `process.memoryUsage()`.
+- For files > 1 GB, increase `--max-old-space-size` proportionally and set `MCP_MAX_FILE_SIZE_MB`.
+- For files > 2 GB, consider pre-processing (splitting, filtering) before loading into this server.
+- The cache holds up to 10 files simultaneously — if working with several large files, each contributes to total heap pressure.
 ## Tools
 
 ### `query`

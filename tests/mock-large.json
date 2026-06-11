@@ -1,0 +1,105 @@
+{
+    "company": {
+        "name": "Acme Corp",
+        "founded": "1985-03-15",
+        "departments": [
+            {
+                "id": 1,
+                "name": "Engineering",
+                "budget": 2500000,
+                "headcount": 150,
+                "manager": "Alice Chen",
+                "location": "Building A",
+                "teams": [
+                    {
+                        "name": "Frontend",
+                        "members": 45,
+                        "techStack": ["React", "TypeScript", "GraphQL"]
+                    },
+                    {
+                        "name": "Backend",
+                        "members": 60,
+                        "techStack": ["Node.js", "Python", "PostgreSQL"]
+                    },
+                    {
+                        "name": "Infrastructure",
+                        "members": 25,
+                        "techStack": ["Kubernetes", "Terraform", "AWS"]
+                    },
+                    {
+                        "name": "QA",
+                        "members": 20,
+                        "techStack": ["Selenium", "Cypress", "Jest"]
+                    }
+                ]
+            },
+            {
+                "id": 2,
+                "name": "Sales",
+                "budget": 1800000,
+                "headcount": 85,
+                "manager": "Bob Martinez",
+                "location": "Building B"
+            },
+            {
+                "id": 3,
+                "name": "Marketing",
+                "budget": 1200000,
+                "headcount": 40,
+                "manager": "Carol Johnson",
+                "location": "Building B"
+            },
+            {
+                "id": 4,
+                "name": "HR",
+                "budget": 800000,
+                "headcount": 20,
+                "manager": "David Kim",
+                "location": "Building A"
+            },
+            {
+                "id": 5,
+                "name": "Finance",
+                "budget": 950000,
+                "headcount": 30,
+                "manager": "Eve Brown",
+                "location": "Building C"
+            }
+        ],
+        "employees": [
+            {"id": 1, "name": "Alice Chen", "email": "alice@acme.com", "department": "Engineering", "salary": 185000, "startDate": "2010-06-01", "active": true, "rating": 4.8},
+            {"id": 2, "name": "Bob Martinez", "email": "bob@acme.com", "department": "Sales", "salary": 165000, "startDate": "2012-03-15", "active": true, "rating": 4.5},
+            {"id": 3, "name": "Carol Johnson", "email": "carol@acme.com", "department": "Marketing", "salary": 155000, "startDate": "2015-01-20", "active": true, "rating": 4.7},
+            {"id": 4, "name": "David Kim", "email": "david@acme.com", "department": "HR", "salary": 140000, "startDate": "2018-09-01", "active": true, "rating": 4.2},
+            {"id": 5, "name": "Eve Brown", "email": "eve@acme.com", "department": "Finance", "salary": 160000, "startDate": "2014-07-10", "active": true, "rating": 4.6},
+            {"id": 6, "name": "Frank Lee", "email": "frank.lee@gmail.com", "department": "Engineering", "salary": 125000, "startDate": "2020-02-14", "active": true, "rating": 3.9},
+            {"id": 7, "name": "Grace Wang", "email": "grace@acme.com", "department": "Engineering", "salary": 135000, "startDate": "2019-11-01", "active": true, "rating": 4.4},
+            {"id": 8, "name": "Henry Patel", "email": "henry@acme.com", "department": "Sales", "salary": 95000, "startDate": "2022-04-01", "active": true, "rating": 3.5},
+            {"id": 9, "name": "Iris Thompson", "email": "iris.t@gmail.com", "department": "Marketing", "salary": 88000, "startDate": "2023-01-15", "active": true, "rating": 4.1},
+            {"id": 10, "name": "Jack Wilson", "email": "jack@acme.com", "department": "Engineering", "salary": 110000, "startDate": "2021-08-20", "active": false, "rating": 2.8},
+            {"id": 11, "name": "Karen Davis", "email": "karen@acme.com", "department": "Finance", "salary": 105000, "startDate": "2020-05-10", "active": true, "rating": 4.0},
+            {"id": 12, "name": "Leo Garcia", "email": "leo@acme.com", "department": "Engineering", "salary": 145000, "startDate": "2017-03-01", "active": true, "rating": 4.3},
+            {"id": 13, "name": "Mia Robinson", "email": "mia.r@gmail.com", "department": "HR", "salary": 78000, "startDate": "2023-06-01", "active": true, "rating": 3.7},
+            {"id": 14, "name": "Noah Clark", "email": "noah@acme.com", "department": "Sales", "salary": 115000, "startDate": "2019-02-28", "active": true, "rating": 4.1},
+            {"id": 15, "name": "Olivia Hall", "email": "olivia@acme.com", "department": "Engineering", "salary": 130000, "startDate": "2020-10-15", "active": true, "rating": 4.5}
+        ],
+        "transactions": [
+            {"id": "TX001", "date": "2024-01-05", "amount": 15000.50, "type": "revenue", "category": "Product", "description": "Enterprise license - Q1"},
+            {"id": "TX002", "date": "2024-01-12", "amount": -3200.00, "type": "expense", "category": "Infrastructure", "description": "AWS monthly"},
+            {"id": "TX003", "date": "2024-01-20", "amount": 8500.00, "type": "revenue", "category": "Consulting", "description": "Integration setup"},
+            {"id": "TX004", "date": "2024-02-01", "amount": -12000.00, "type": "expense", "category": "Payroll", "description": "Contractor payments"},
+            {"id": "TX005", "date": "2024-02-15", "amount": 22000.00, "type": "revenue", "category": "Product", "description": "Enterprise license - addon"},
+            {"id": "TX006", "date": "2024-03-01", "amount": -4500.75, "type": "expense", "category": "Marketing", "description": "Ad campaign Q1"},
+            {"id": "TX007", "date": "2024-03-10", "amount": 6750.25, "type": "revenue", "category": "Support", "description": "Premium support contract"},
+            {"id": "TX008", "date": "2024-03-20", "amount": -1800.00, "type": "expense", "category": "Office", "description": "Equipment purchase"},
+            {"id": "TX009", "date": "2024-04-01", "amount": 45000.00, "type": "revenue", "category": "Product", "description": "Enterprise license - annual"},
+            {"id": "TX010", "date": "2024-04-15", "amount": -8900.00, "type": "expense", "category": "Infrastructure", "description": "Server upgrade"}
+        ],
+        "metadata": {
+            "lastUpdated": "2024-12-01T10:30:00Z",
+            "version": "3.2.1",
+            "recordCount": 15,
+            "tags": ["enterprise", "active", "production"]
+        }
+    }
+}
