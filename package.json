@@ -16,6 +16,9 @@
     "type": "git",
     "url": "git+https://github.com/oovz/mcp-json-reader.git"
   },
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org/"
+  },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
     "jsonpath-plus": "^10.2.0",
