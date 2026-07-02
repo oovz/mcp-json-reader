@@ -5,7 +5,7 @@ export * from "./types.js";
 export * from "./cache.js";
 export * from "./math.js";
 export * from "./operations.js";
-export { server } from "./server.js";
+export { server, resolveQuery } from "./server.js";
 
 // Run the MCP server automatically when run directly in production (not in tests)
 if (process.env.NODE_ENV !== "test") {
