@@ -16,7 +16,21 @@ export function safeEvaluateMath(num: number, expr: string): number {
             i++;
             continue;
         }
-        if (char === '(' || char === ')') {
+        if (char === '(') {
+            // Implicit multiplication: when '(' directly follows a number
+            // (e.g. "0 (2+3)*4" from .math((2+3)*4) applied to num=0) or a
+            // closing paren (e.g. "(2+3)(4+5)"), insert an explicit '*' so
+            // the shunting-yard algorithm can evaluate it.
+            const lastToken = tokens[tokens.length - 1];
+            if (lastToken !== undefined &&
+                (lastToken === ')' || /^-?\d+(?:\.\d+)?$/.test(lastToken))) {
+                tokens.push('*');
+            }
+            tokens.push(char);
+            i++;
+            continue;
+        }
+        if (char === ')') {
             tokens.push(char);
             i++;
             continue;
