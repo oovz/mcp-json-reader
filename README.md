@@ -7,6 +7,9 @@
 
 A Model Context Protocol (MCP) server for reading, querying, and filtering **local** JSON files using extended JSONPath syntax. It allows LLMs to perform complex sorting, aggregations, math, and string operations directly on local datasets.
 
+> [!NOTE]
+> In addition to strict JSON (RFC 8259), the server parses **JSON5** — a superset that adds `//` and `/* */` comments, trailing commas, single-quoted strings, unquoted keys, hexadecimal numbers, `Infinity`/`-Infinity`/`NaN`, and multi-line strings. This makes it suitable for reading `tsconfig.json`-style JSONC files, commented config files, and other "JSON with comments" formats. See [spec.json5.org](https://spec.json5.org/).
+
 ## Quick Start
 
 Run the server directly via `npx`:

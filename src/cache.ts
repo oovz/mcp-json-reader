@@ -1,5 +1,6 @@
 import { stat, readFile } from "fs/promises";
 import path from "path";
+import JSON5 from "json5";
 import { JsonValue, CacheEntry } from "./types.js";
 
 /**
@@ -76,7 +77,12 @@ export async function readJsonFile(filePath: string): Promise<JsonValue> {
         }
 
         const content = await readFile(fullPath, "utf-8");
-        const data: JsonValue = JSON.parse(content);
+        // JSON5 is a superset of JSON: it accepts strict JSON plus comments,
+        // trailing commas, single-quoted strings, hex numbers, Infinity/NaN,
+        // unquoted keys, and multi-line strings. This fulfills the README's
+        // promise of "JSON with comments" support while remaining a drop-in
+        // replacement for strict JSON files.
+        const data: JsonValue = JSON5.parse(content);
 
         if (jsonCache.size >= MAX_CACHE_ENTRIES) {
             const firstKey = jsonCache.keys().next().value;
