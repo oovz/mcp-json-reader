@@ -5,14 +5,13 @@ on:
     tags:
       - 'v*'
 
-env:
-  GOTOOLCHAIN: auto
-
 jobs:
   build:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    env:
+      GOTOOLCHAIN: auto
     strategy:
       fail-fast: false
       matrix:
@@ -48,12 +47,15 @@ jobs:
 
       - name: Test
         run: go test ./... -count=1
+        env:
+          GOTOOLCHAIN: auto
 
       - name: Build binary
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: '0'
+          GOTOOLCHAIN: auto
         run: |
           mkdir -p dist/package
           suffix=""

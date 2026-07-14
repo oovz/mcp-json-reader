@@ -10,9 +10,6 @@ on:
 permissions:
   contents: read
 
-env:
-  GOTOOLCHAIN: auto
-
 jobs:
   test:
     name: Go ${{ matrix.os }}
@@ -21,7 +18,8 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
-
+    env:
+      GOTOOLCHAIN: auto
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -34,9 +32,13 @@ jobs:
 
       - name: Verify modules
         run: go mod verify
+        env:
+          GOTOOLCHAIN: auto
 
       - name: Check module metadata
         run: go mod tidy -diff
+        env:
+          GOTOOLCHAIN: auto
 
       - name: Check formatting
         shell: bash
@@ -44,16 +46,24 @@ jobs:
 
       - name: Vet
         run: go vet ./...
+        env:
+          GOTOOLCHAIN: auto
 
       - name: Test
         run: go test ./... -count=1
+        env:
+          GOTOOLCHAIN: auto
 
       - name: Build
         run: go build -trimpath ./cmd/mcp-json-reader
+        env:
+          GOTOOLCHAIN: auto
 
   race:
     name: Race detector
     runs-on: ubuntu-latest
+    env:
+      GOTOOLCHAIN: auto
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -66,3 +76,5 @@ jobs:
 
       - name: Test with race detector
         run: go test -race ./... -count=1
+        env:
+          GOTOOLCHAIN: auto
