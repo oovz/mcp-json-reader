@@ -103,3 +103,42 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release create "$GITHUB_REF_NAME" dist/* --generate-notes --verify-tag
+
+  verify-module:
+    name: Verify Go module
+    needs: release
+    runs-on: ubuntu-latest
+    env:
+      GOTOOLCHAIN: auto
+    steps:
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.26.x'
+          cache: false
+
+      - name: Verify go install works against the published tag
+        env:
+          GOTOOLCHAIN: auto
+        run: |
+          # The Go module proxy may take a few seconds to index the new tag.
+          # Poll until the version is available.
+          version="${GITHUB_REF_NAME}"
+          for i in $(seq 1 12); do
+            if go list -m "github.com/oovz/mcp-json-reader/v2@${version}" 2>/dev/null; then
+              echo "Module version ${version} is available on the proxy."
+              break
+            fi
+            echo "Waiting for proxy to index ${version}... (attempt $i/12)"
+            sleep 10
+          done
+
+          go install "github.com/oovz/mcp-json-reader/v2/cmd/mcp-json-reader@${version}"
+          installed_version="$(mcp-json-reader --version)"
+          expected_version="${version#v}"
+          echo "Installed: ${installed_version}"
+          echo "Expected:  mcp-json-reader ${expected_version}"
+          if [ "${installed_version}" != "mcp-json-reader ${expected_version}" ]; then
+            echo "::error::Installed version does not match tag"
+            exit 1
+          fi
