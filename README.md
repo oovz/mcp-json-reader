@@ -1,183 +1,283 @@
-# MCP JSON Reader (`mcp-json-reader`)
+# MCP JSON Reader
 
-[![npm version](https://img.shields.io/npm/v/mcp-json-reader.svg)](https://www.npmjs.com/package/mcp-json-reader)
-[![Install in VS Code](https://img.shields.io/badge/Install%20in-VS%20Code-007ACC?style=flat-square&logo=visual-studio-code&logoColor=white)](https://vscode.dev/redirect/mcp/install?name=mcp-json-reader&config=%7B%22command%22%3A%22npx%22%2C%22args%22%3A%5B%22-y%22%2C%22mcp-json-reader%22%5D%7D)
-[![Install in VS Code Insiders](https://img.shields.io/badge/Install%20in-VS%20Code%20Insiders-24bfa5?style=flat-square&logo=visual-studio-code&logoColor=white)](https://insiders.vscode.dev/redirect/mcp/install?name=mcp-json-reader&config=%7B%22command%22%3A%22npx%22%2C%22args%22%3A%5B%22-y%22%2C%22mcp-json-reader%22%5D%7D&quality=insiders)
-[![Install in Cursor](https://img.shields.io/badge/Install%20in-Cursor-000000?style=flat-square)](https://cursor.com/en/install-mcp?name=mcp-json-reader&config=eyJjb21tYW5kIjoibnB4IiwiYXJncyI6WyIteSIsIm1jcC1qc29uLXJlYWRlciJdfQ==)
+A bounded-memory [Model Context Protocol](https://modelcontextprotocol.io/) server for querying large or complex local JSON files.
 
-A Model Context Protocol (MCP) server for reading, querying, and filtering **local** JSON files using extended JSONPath syntax. It allows LLMs to perform complex sorting, aggregations, math, and string operations directly on local datasets.
-
-> [!NOTE]
-> In addition to strict JSON (RFC 8259), the server parses **JSON5** — a superset that adds `//` and `/* */` comments, trailing commas, single-quoted strings, unquoted keys, hexadecimal numbers, `Infinity`/`-Infinity`/`NaN`, and multi-line strings. This makes it suitable for reading `tsconfig.json`-style JSONC files, commented config files, and other "JSON with comments" formats. See [spec.json5.org](https://spec.json5.org/).
-
-## Quick Start
-
-Run the server directly via `npx`:
-
-```bash
-npx mcp-json-reader --root /path/to/your/json/data
-```
-
-## Tools Exposed
-
-| Tool | Description | Key Arguments |
-| :--- | :--- | :--- |
-| `query` | Queries local JSON using standard JSONPath + custom extensions (sorting, math, aggregates, etc.). | `path` (string), `jsonPath` (string) |
-| `filter` | Extracts and filters elements from an array in a local JSON file using advanced logic. | `path` (string), `jsonPath` (string), `condition` (string) |
-
-### Example Queries
-
-*   **Sort & Slice:** `$.items.sort(-price)[0:5]` (Sort items by price descending and return top 5)
-*   **Aggregation:** `$.transactions.sum(amount)` (Sum transaction amounts)
-*   **Complex Filter:** `$.users` with condition `@.email.endsWith('@gmail.com')`
-
----
-
-<details>
-<summary>🛠️ IDE & Agent Configuration (Cursor, VS Code, Windsurf, Claude Desktop, Cline)</summary>
-
-### Command Line Options & Env Variables
-*   **Command Line**: `--root <base_path>` (Optional)
-*   **Environment Variable**: `MCP_JSON_ROOT` (Optional)
-
-If neither is provided, the server defaults to the Current Working Directory (CWD) of the process.
-
-### Configuration Snippets
-
-#### Claude Desktop
-Add this to your `claude_desktop_config.json`:
-```json
-{
-  "mcpServers": {
-    "mcp-json-reader": {
-      "command": "npx",
-      "args": ["-y", "mcp-json-reader", "--root", "/absolute/path/to/your/json/data"]
-    }
-  }
-}
-```
-
-#### Cursor
-Go to **Settings > Features > MCP**, click **Add New MCP Server**:
-*   **Name**: `mcp-json-reader`
-*   **Type**: `command`
-*   **Command**: `npx -y mcp-json-reader --root /absolute/path/to/your/json/data`
-
-#### Cline / Roo-Code
-Add this to your `cline_mcp_settings.json` (or `roo_mcp_settings.json`):
-```json
-{
-  "mcpServers": {
-    "mcp-json-reader": {
-      "command": "npx",
-      "args": ["-y", "mcp-json-reader", "--root", "/absolute/path/to/your/json/data"]
-    }
-  }
-}
-```
-
-#### Windsurf
-Add this to your `mcp_config.json`:
-```json
-{
-  "mcpServers": {
-    "mcp-json-reader": {
-      "command": "npx",
-      "args": ["-y", "mcp-json-reader", "--root", "/absolute/path/to/your/json/data"]
-    }
-  }
-}
-```
-
-#### GitHub Copilot (Coding Agent / CLI)
-For the Copilot agent configuration:
-```json
-{
-  "mcpServers": {
-    "mcp-json-reader": {
-      "command": "npx",
-      "args": ["-y", "mcp-json-reader", "--root", "/absolute/path/to/your/json/data"],
-      "tools": ["*"]
-    }
-  }
-}
-```
-</details>
-
-<details>
-<summary>📝 Extended JSONPath Syntax Details</summary>
-
-The query tool supports standard JSONPath plus the following custom extensions:
-
-*   **Sorting**: `.sort(field)` (ascending) or `.sort(-field)` (descending)
-*   **Aggregation**: `.sum(field)`, `.avg(field)`, `.min(field)`, `.max(field)`
-*   **Numeric Ops**: `.math(+10)`, `.math(*2)`, `.round()`, `.abs()`, `.sqrt()`, etc.
-*   **String Ops**: `.contains('x')`, `.startsWith('x')`, `.toLowerCase()`, `.toUpperCase()`, etc.
-*   **Date Ops**: `.format('YYYY-MM-DD')`, `.isToday()`
-*   **Array Ops**: `.distinct()`, `.reverse()`, `[start:end]` (slice)
-</details>
-
-<details>
-<summary>⚡ Performance, Caching & V8 Memory Limits</summary>
-
-### Caching
-The server implements an in-memory **LRU cache** (up to 10 entries) for parsed JSON objects. Subsequent queries on the same file skip the read and parse steps. The cache automatically detects file modifications using file timestamps and invalidates stale entries.
-
-### V8 Heap Memory Limits
-Node.js imposes a default heap memory limit of ~4 GB on 64-bit systems. Parsing JSON constructs in-memory object graphs that consume **2–6× the raw file size**.
-
-| Raw File Size | Estimated Heap Usage (parsed) | Fits in 4 GB V8 Heap? |
-|--------------|-------------------------------|----------------------|
-| 100 MB       | 200–600 MB                    | Yes                  |
-| 500 MB       | 1–3 GB                        | Usually              |
-| 1 GB         | 2–6 GB                        | Risky                |
-| 1.5 GB       | 3–9 GB                        | At the edge          |
-| 2+ GB        | 4–12 GB                       | No — OOM crash       |
+MCP JSON Reader streams tokens from disk instead of unmarshaling the whole file. It supports exact [JSON Pointer](https://datatracker.ietf.org/doc/html/rfc6901) paths, a documented forward-streaming [JSONPath](https://datatracker.ietf.org/doc/html/rfc9535) profile, reusable file handles, and bounded pagination over local stdio.
 
 > [!IMPORTANT]
-> The default enforced file size limit is **1.5 GB** per file.
+> Version 2 is a breaking Go rewrite. The former npm package, JSON5 support, `query`/`filter` tools, and proprietary query operations are gone.
 
-To tune limits for larger files:
+## Features
+
+- Streams JSON, JSONL, and JSON-seq files of any size with fixed memory caps
+- Exact JSON Pointer and forward-streaming JSONPath queries
+- Reusable process-scoped file handles with cursor pagination
+- `os.Root` path confinement; no network transport or URL input
+- Structured, machine-readable tool errors
+
+> [!NOTE]
+> JSONC and JSON5 support is planned for a future release. Compressed input, SQL, jq, and network URLs are out of scope.
+
+## Install
+
+Requires Go 1.26.5 or later.
+
 ```bash
-# Increase V8 heap (e.g., to 8 GB)
-node --max-old-space-size=8192 ./build/index.js
-
-# Increase the file size limit via environment variable (in MB)
-MCP_MAX_FILE_SIZE_MB=2048 npx mcp-json-reader
+go install github.com/oovz/mcp-json-reader/v2/cmd/mcp-json-reader@v2.0.0
 ```
+
+From an untagged checkout:
+
+```bash
+CGO_ENABLED=0 go build -trimpath -o bin/mcp-json-reader ./cmd/mcp-json-reader
+```
+
+Pick a root directory. Every requested file must stay inside it, including after symlink resolution.
+
+```bash
+mcp-json-reader --root /workspace/data
+```
+
+`MCP_JSON_ROOT` works in place of `--root`. On Windows, use absolute paths for both the executable and the root when the client does not inherit your `PATH`.
+
+Register the server with an MCP client:
+
+```json
+{
+  "mcpServers": {
+    "json-reader": {
+      "command": "mcp-json-reader",
+      "args": ["--root", "/workspace/data"]
+    }
+  }
+}
+```
+
+<details>
+<summary><strong>For AI agents</strong></summary>
+
+This server lets a coding agent read local JSON, JSONL, and JSON-seq files without loading them into memory. Hand it a root directory and call three tools: `json_open`, `json_read`, `json_close`.
+
+Open a file and get a handle:
+
+```json
+{ "path": "orders.jsonl", "format": "auto", "validation": "probe" }
+```
+
+Read by handle…
+
+```json
+{ "file_id": "jf_...", "language": "pointer", "query": "/orders/0/id" }
+```
+
+…or open a path implicitly and query in one call:
+
+```json
+{ "path": "orders.jsonl", "format": "jsonl", "language": "jsonpath", "query": "$[*].id", "max_items": 100 }
+```
+
+Page through large results by passing the cursor returned in the previous response:
+
+```json
+{ "cursor": "jc_..." }
+```
+
+Close the handle when done (close is idempotent):
+
+```json
+{ "file_id": "jf_..." }
+```
+
+See the reference below for tool schemas, formats, limits, and error codes.
+
+</details>
+
+## Tools
+
+### `json_open`
+
+Open and inspect a file without materializing it. Returns a process-scoped handle plus the fixed format, validation coverage, and source metadata.
+
+```json
+{ "path": "orders.jsonl", "format": "auto", "validation": "probe" }
+```
+
+`validation` has two modes: `probe` examines a bounded prefix (large files return `complete: false` and can still fail later), `full` streams and validates the complete file without materializing it. Explicit formats are authoritative—a file opened as `json` is never silently reinterpreted as JSONL.
+
+### `json_read`
+
+Read from a handle, or open a path implicitly and query in one call. Matches contain an RFC 6901 path and a JSON value:
+
+```json
+{
+  "file_id": "jf_...",
+  "language": "jsonpath",
+  "query": "$[*].id",
+  "items": [
+    {"path": "/0/id", "value": 101},
+    {"path": "/1/id", "value": 102}
+  ],
+  "complete": false,
+  "next_cursor": "jc_...",
+  "stats": {"returned": 2, "skipped": 0}
+}
+```
+
+Continue with the opaque cursor by itself: `{"cursor": "jc_..."}`. Cursors are single-use, process-scoped, bound to the source fingerprint and original query, and expire after inactivity. Each continuation rescans from the beginning and skips previously returned matches, keeping cursor state small at the cost of repeated I/O.
+
+Pagination is driven by `max_items`. `max_result_bytes` is a hard limit on the complete serialized response; it does not split a value or create a page automatically. If the envelope exceeds the limit, lower `max_items` or raise the server cap.
+
+An implicit read closes its hidden file handle when the result is complete. While paginated, the response includes a `file_id` only for cleanup via `json_close`; continue with `next_cursor`, not by starting another read from that `file_id`.
+
+Pointers accept plain (`/orders/0/id`) and URI-fragment (`#/orders/0/id`) forms. Use `~1` for `/` and `~0` for `~` inside a member name. See the [JSONPath profile](docs/jsonpath-profile.md) for supported selectors, filter semantics, and deliberate limits.
+
+### `json_close`
+
+```json
+{ "file_id": "jf_..." }
+```
+
+Returns `{"file_id":"jf_...","closed":true}`. Repeating it returns the same `file_id` with `closed: false`. Cancellation stops waiting for `json_close`, but a close that has started is not rolled back: the handle remains unavailable and cleanup finishes after any active read releases its lease.
+
+## Formats
+
+| Value | Meaning |
+| --- | --- |
+| `auto` | Detect from a bounded sample and extension. Never guesses JSONC or JSON5. |
+| `json` | Exactly one standard JSON value. Any JSON root type is valid. |
+| `jsonl` | Every physical LF/CRLF-delimited record must contain exactly one standard JSON value. Interior blank lines are invalid; final LF is optional. Records form a virtual array. |
+| `json-seq` | Zero or more values prefixed by ASCII RS `0x1E`. Consecutive separators create an invalid empty record. A top-level number must be followed by JSON whitespace. Records form a virtual array; the empty byte stream is valid. |
+
+Auto-detection rules: an RS at byte zero identifies `json-seq`; `.jsonl` and `.ndjson` identify `jsonl`; multiple independently valid line-aligned values identify `jsonl`; ambiguous one-line values and unknown extensions default to `json`. Once selected, a handle's format never changes.
+
+<details>
+<summary><strong>Resource limits</strong></summary>
+
+Defaults can be changed with CLI flags. Per-read `max_items` and `max_result_bytes` may only lower server caps.
+
+| Limit | Default |
+| --- | ---: |
+| Path bytes | 32 KiB |
+| Query bytes | 16 KiB |
+| Encoded bytes inside one string token | 1 MiB |
+| Number bytes | 1 KiB |
+| Nesting depth | 256 |
+| Members per object | 100,000 |
+| Retained key bytes per object | 8 MiB |
+| Retained key bytes across active nested objects | 32 MiB |
+| Record bytes | 64 MiB |
+| Candidate bytes | 8 MiB |
+| Serialized read result | 4 MiB |
+| Items per page | 1,000 |
+| Scan time | 30 seconds |
+| Probe prefix | 4 MiB / 32 records |
+| Open handles | 32 |
+| Stored cursors | 128 |
+| Concurrent scans | 4 |
+| Handle / cursor idle TTL | 15 minutes / 5 minutes |
+
+Run `mcp-json-reader -help` for the corresponding flags.
+
 </details>
 
 <details>
-<summary>🤖 LLM / AI Model Quick-Start & Auto-Installation</summary>
+<summary><strong>Errors</strong></summary>
 
-> [!NOTE]
-> This section is optimized for AI assistants reading this README to understand how to auto-configure and use this server.
+Tool failures use `isError: true`. The same machine-readable object appears in `structuredContent` and as JSON text for older clients.
 
-### Server Identity
-*   **Name**: `mcp-json-reader`
-*   **Primary command**: `npx -y mcp-json-reader`
-*   **Input Schema & Tools**:
-    1.  `query` (reads and queries JSONPath)
-        *   `path` (string): Absolute or relative file path.
-        *   `jsonPath` (string): Extended JSONPath expression.
-    2.  `filter` (filters array datasets)
-        *   `path` (string): Absolute or relative file path.
-        *   `jsonPath` (string): JSONPath pointing to an array.
-        *   `condition` (string): Condition expression (e.g., `@.price > 10`).
+```json
+{
+  "code": "FORMAT_MISMATCH",
+  "message": "expected one JSON document, but found another top-level value",
+  "expected_format": "json",
+  "likely_formats": ["jsonl"],
+  "retry": {"format": "jsonl"}
+}
+```
 
-### AI Instructions for Installation
-If the user asks you (the AI model) to install or configure this MCP server:
-1.  Locate their IDE's MCP configuration file (e.g., `claude_desktop_config.json` for Claude Desktop, `cline_mcp_settings.json` for Cline, or `mcp_config.json` for Windsurf).
-2.  Add `mcp-json-reader` under the `mcpServers` object using:
-    *   Command: `"npx"`
-    *   Args: `["-y", "mcp-json-reader", "--root", "<project_root_or_data_directory>"]`
-3.  Ensure the `--root` argument matches the workspace or data directory they intend to query.
+| Code | Meaning |
+| --- | --- |
+| `UNSUPPORTED_FORMAT` | The requested format name is not supported. |
+| `FORMAT_MISMATCH` | The selected framing does not match the observed source. |
+| `SYNTAX_ERROR` | A standard JSON value or frame is malformed. |
+| `UNSUPPORTED_SYNTAX` | A recognized non-standard construct, currently JSON comments, was found. |
+| `QUERY_SYNTAX_ERROR` | A Pointer or JSONPath expression is malformed. |
+| `UNSUPPORTED_QUERY_FEATURE` | A Pointer or JSONPath feature is outside this server's profile. |
+| `RESOURCE_LIMIT_EXCEEDED` | A configured parser, result, time, handle, cursor, or concurrency limit was reached. |
+| `SOURCE_CHANGED` | File identity, size, or modification time changed after open. |
+| `HANDLE_EXPIRED` | A handle or cursor is closed, expired, consumed, or otherwise unavailable. |
+| `INVALID_ARGUMENT` | Tool fields are missing, conflicting, empty, or outside their allowed range. |
+| `ACCESS_DENIED` | The requested path is outside the configured root or escapes through a link. |
+| `IO_ERROR` | The source or configured root could not be read. |
+| `CANCELLED` | The client cancelled the operation. |
+| `INTERNAL_ERROR` | The server could not complete an internal operation. |
+
 </details>
 
 ## Development
 
+### Prerequisites
+
+- Go 1.26.5 or later (`go version`)
+- A C compiler (GCC, Clang, or MSVC) is required only for the race detector (`go test -race`)
+
+### Get the source
+
 ```bash
-npm install
-npm run build
-npm test
+git clone https://github.com/oovz/mcp-json-reader.git
+cd mcp-json-reader
+go mod download
 ```
+
+### Build
+
+```bash
+go build -trimpath ./cmd/mcp-json-reader
+# or a static binary with no CGO runtime requirement:
+CGO_ENABLED=0 go build -trimpath -o bin/mcp-json-reader ./cmd/mcp-json-reader
+```
+
+### Run locally
+
+```bash
+./bin/mcp-json-reader --root ./tests
+```
+
+The server speaks MCP over stdio. Point any MCP client at the built binary with `--root` set to a directory of JSON files. The `tests/` folder ships fixtures (`mock.json`, `mock-large.json`, `mock-edge-cases.json`) you can query immediately.
+
+### Test
+
+```bash
+# formatting and vet
+gofmt -l cmd internal
+go vet ./...
+
+# full unit and integration suite
+go test ./...
+# run cases in a random order to catch order-dependent state
+go test -shuffle=on ./...
+# race detector (requires CGO and a C compiler)
+go test -race ./...
+```
+
+### Fuzz
+
+Seeded fuzz targets cover Pointer and JSONPath compilation, strict document validation, and both record framers. The normal test suite runs their seed corpus; you can also run each target for a bounded interval:
+
+```bash
+go test ./internal/query -run=^$ -fuzz=FuzzCompileQueries -fuzztime=10s
+go test ./internal/stream -run=^$ -fuzz=FuzzValidateDocument -fuzztime=10s
+go test ./internal/stream -run=^$ -fuzz=FuzzRecordFramers -fuzztime=10s
+```
+
+### What CI runs
+
+CI runs on Ubuntu, Windows, and macOS with Go 1.26.x. The checks are `go mod verify`, `go mod tidy -diff`, `gofmt -l`, `go vet`, `go test ./... -count=1`, `go build -trimpath ./cmd/mcp-json-reader`, plus a separate race-detector job (`go test -race ./... -count=1`). Run the same commands locally before pushing.
+
+## Standards
+
+- MCP transport and tools: [MCP 2025-11-25](https://modelcontextprotocol.io/specification/2025-11-25); the pinned Go SDK also negotiates `2025-06-18`, `2025-03-26`, and `2024-11-05`
+- Standard JSON: [RFC 8259](https://datatracker.ietf.org/doc/html/rfc8259), with invalid UTF-8 and duplicate names rejected
+- JSON Pointer: [RFC 6901](https://datatracker.ietf.org/doc/html/rfc6901)
+- JSONPath: [RFC 9535](https://datatracker.ietf.org/doc/html/rfc9535), documented streaming profile
+- JSON text sequences: [RFC 7464](https://datatracker.ietf.org/doc/html/rfc7464)

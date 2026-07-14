@@ -1,35 +1,100 @@
-name: Release to npm
+name: Release binaries
 
 on:
   push:
     tags:
       - 'v*'
-  workflow_dispatch:
 
 jobs:
-  publish:
+  build:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+            archive: tar.gz
+          - goos: linux
+            goarch: arm64
+            archive: tar.gz
+          - goos: darwin
+            goarch: amd64
+            archive: tar.gz
+          - goos: darwin
+            goarch: arm64
+            archive: tar.gz
+          - goos: windows
+            goarch: amd64
+            archive: zip
+          - goos: windows
+            goarch: arm64
+            archive: zip
+
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
+      - name: Set up Go
+        uses: actions/setup-go@v6
         with:
-          node-version: 24
-          registry-url: 'https://registry.npmjs.org'
+          go-version: '1.26.x'
+          cache: true
 
-      - name: Install dependencies
-        run: npm install
+      - name: Test
+        run: go test ./... -count=1
 
-      - name: Build project
-        run: npm run build
+      - name: Build binary
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: '0'
+        run: |
+          mkdir -p dist/package
+          suffix=""
+          if [ "$GOOS" = "windows" ]; then suffix=".exe"; fi
+          version="${GITHUB_REF_NAME#v}"
+          go build -trimpath -ldflags="-s -w -X github.com/oovz/mcp-json-reader/v2/internal/mcpserver.Version=${version}" -o "dist/package/mcp-json-reader${suffix}" ./cmd/mcp-json-reader
+          cp README.md LICENSE "dist/package/"
 
-      - name: Run tests
-        run: npm test
+      - name: Archive
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          ARCHIVE: ${{ matrix.archive }}
+        run: |
+          name="mcp-json-reader_${GITHUB_REF_NAME}_${GOOS}_${GOARCH}"
+          if [ "$ARCHIVE" = "zip" ]; then
+            (cd dist/package && zip -r "../${name}.zip" .)
+          else
+            tar -C dist/package -czf "dist/${name}.tar.gz" .
+          fi
 
-      - name: Publish to npm
-        run: npm publish --access public --provenance
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: mcp-json-reader-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/*.${{ matrix.archive }}
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create checksums
+        run: (cd dist && sha256sum * > SHA256SUMS)
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --generate-notes --verify-tag
