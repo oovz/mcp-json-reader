@@ -23,7 +23,7 @@ MCP JSON Reader streams tokens from disk instead of unmarshaling the whole file.
 Requires Go 1.26.5 or later.
 
 ```bash
-go install github.com/oovz/mcp-json-reader/v2/cmd/mcp-json-reader@v2.0.1
+go install github.com/oovz/mcp-json-reader/v2/cmd/mcp-json-reader@v2.0.2
 ```
 
 From an untagged checkout:

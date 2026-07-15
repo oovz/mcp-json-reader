@@ -90,6 +90,11 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
       - name: Download artifacts
         uses: actions/download-artifact@v8
         with:
@@ -99,10 +104,34 @@ jobs:
       - name: Create checksums
         run: (cd dist && sha256sum * > SHA256SUMS)
 
+      - name: Build release notes
+        id: notes
+        run: |
+          # Find the previous tag before the current one.
+          previous_tag="$(git describe --tags --abbrev=0 "${GITHUB_REF_NAME}^" 2>/dev/null || true)"
+
+          {
+            echo "## Changes"
+            echo
+            if [ -n "$previous_tag" ]; then
+              echo "Commits since ${previous_tag}:"
+              echo
+              echo '```'
+              git log --pretty=format:'%h %s' "${previous_tag}..${GITHUB_REF_NAME}"
+              echo
+              echo '```'
+            else
+              echo '```'
+              git log --pretty=format:'%h %s' "${GITHUB_REF_NAME}"
+              echo
+              echo '```'
+            fi
+          } > release_notes.md
+
       - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" dist/* --generate-notes --verify-tag
+        run: gh release create "$GITHUB_REF_NAME" dist/* --notes-file release_notes.md --verify-tag
 
   verify-module:
     name: Verify Go module

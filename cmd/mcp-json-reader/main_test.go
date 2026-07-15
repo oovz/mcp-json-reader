@@ -129,7 +129,7 @@ func TestV2ReleaseMetadataUsesTheMajorVersionModulePath(t *testing.T) {
 	}{
 		{path: "go.mod", want: "module github.com/oovz/mcp-json-reader/v2"},
 		{path: filepath.Join(".github", "workflows", "release.yml"), want: "-X github.com/oovz/mcp-json-reader/v2/internal/mcpserver.Version="},
-		{path: "README.md", want: "go install github.com/oovz/mcp-json-reader/v2/cmd/mcp-json-reader@v2.0.1"},
+		{path: "README.md", want: "go install github.com/oovz/mcp-json-reader/v2/cmd/mcp-json-reader@v2.0.2"},
 	}
 	for _, test := range tests {
 		contents, readErr := os.ReadFile(filepath.Join(moduleRoot, test.path))
