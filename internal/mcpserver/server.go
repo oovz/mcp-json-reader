@@ -1,20 +1,23 @@
 package mcpserver
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
-	"io"
+	"encoding/json/jsontext"
 	"runtime/debug"
 	"strings"
+	"unicode/utf8"
 
+	"github.com/google/jsonschema-go/jsonschema"
+	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/oovz/mcp-json-reader/v3/internal/core"
 	"github.com/oovz/mcp-json-reader/v3/internal/service"
 )
 
 var Version = ""
+
+const currentProtocolVersion = "2026-07-28"
 
 func CurrentVersion() string {
 	if Version != "" {
@@ -31,13 +34,17 @@ func New(jsonService *service.Service) *mcp.Server {
 		Name:    "mcp-json-reader",
 		Title:   "MCP JSON Reader",
 		Version: CurrentVersion(),
-	}, nil)
+	}, &mcp.ServerOptions{
+		Capabilities:              &mcp.ServerCapabilities{},
+		SupportedProtocolVersions: []string{currentProtocolVersion},
+	})
+	server.AddReceivingMiddleware(rejectLegacyMethods)
 
 	server.AddTool(&mcp.Tool{
 		Name:         "json_open",
 		Title:        "Open JSON file",
 		Description:  "Open and inspect a local standard JSON file without loading the entire file into memory. Supports one JSON document, JSON Lines/NDJSON, and record-separator-delimited JSON sequences. Returns a process-scoped file handle for repeated reads.",
-		InputSchema:  openInputSchema(),
+		InputSchema:  openArgumentsSchema.Schema(),
 		OutputSchema: openOutputSchema(),
 		Annotations:  &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: boolPointer(false)},
 	}, func(ctx context.Context, request *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -56,7 +63,7 @@ func New(jsonService *service.Service) *mcp.Server {
 		Name:         "json_read",
 		Title:        "Read JSON values",
 		Description:  "Read matching standard JSON values from an opened local file or directly from a local path. Use pointer for an exact location such as /orders/0/id, or the bounded forward-streaming JSONPath profile for selections such as $.orders[*].id and $.orders[?@.total > 100].id. Results are bounded and paginated.",
-		InputSchema:  readInputSchema(),
+		InputSchema:  readArgumentsSchema.Schema(),
 		OutputSchema: readOutputSchema(),
 		Annotations:  &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: boolPointer(false)},
 	}, func(ctx context.Context, request *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -75,7 +82,7 @@ func New(jsonService *service.Service) *mcp.Server {
 		Name:         "json_close",
 		Title:        "Close JSON file",
 		Description:  "Release a process-scoped JSON file handle and its pagination cursors. This operation is idempotent.",
-		InputSchema:  closeInputSchema(),
+		InputSchema:  closeArgumentsSchema.Schema(),
 		OutputSchema: closeOutputSchema(),
 		Annotations:  &mcp.ToolAnnotations{DestructiveHint: boolPointer(false), IdempotentHint: true, OpenWorldHint: boolPointer(false)},
 	}, func(ctx context.Context, request *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -92,114 +99,82 @@ func New(jsonService *service.Service) *mcp.Server {
 	return server
 }
 
-func decodeArguments[T any](raw json.RawMessage) (T, map[string]json.RawMessage, *core.AppError) {
+// rejectLegacyMethods prevents the SDK's legacy lifecycle from establishing a
+// session. StdioTransport checks request metadata before SDK dispatch.
+func rejectLegacyMethods(next mcp.MethodHandler) mcp.MethodHandler {
+	return func(ctx context.Context, method string, request mcp.Request) (mcp.Result, error) {
+		switch method {
+		case "initialize", "ping", "notifications/initialized":
+			return nil, unsupportedProtocolError("")
+		}
+		return next(ctx, method, request)
+	}
+}
+
+func unsupportedProtocolError(requested string) error {
+	data, _ := json.Marshal(mcp.UnsupportedProtocolVersionData{
+		Supported: []string{currentProtocolVersion},
+		Requested: requested,
+	})
+	return &jsonrpc.Error{
+		Code:    mcp.CodeUnsupportedProtocolVersion,
+		Message: "only MCP 2026-07-28 is supported",
+		Data:    data,
+	}
+}
+
+// Resolve the three closed schemas once. Invalid built-in schemas are a
+// programming error; request validation always uses these exact schemas.
+var (
+	openArgumentsSchema  = mustResolveSchema(openInputSchema())
+	readArgumentsSchema  = mustResolveSchema(readInputSchema())
+	closeArgumentsSchema = mustResolveSchema(closeInputSchema())
+)
+
+func mustResolveSchema(value map[string]any) *jsonschema.Resolved {
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		panic(err)
+	}
+	var schema jsonschema.Schema
+	if err := json.Unmarshal(encoded, &schema); err != nil {
+		panic(err)
+	}
+	resolved, err := schema.Resolve(nil)
+	if err != nil {
+		panic(err)
+	}
+	return resolved
+}
+
+func decodeArguments[T any](raw json.RawMessage, schema *jsonschema.Resolved) (T, *core.AppError) {
 	var output T
-	if len(raw) == 0 {
-		raw = json.RawMessage(`{}`)
+	// Validate the original JSON before map decoding can collapse duplicate keys
+	// or a permissive decoder can replace malformed Unicode.
+	if !jsontext.Value(raw).IsValid() {
+		return output, invalidArguments("tool arguments must contain one strict JSON object")
 	}
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&output); err != nil {
-		return output, nil, invalidArguments("tool arguments do not match the declared schema")
+	var instance any
+	if err := json.Unmarshal(raw, &instance); err != nil {
+		return output, invalidArguments("tool arguments contain invalid values")
 	}
-	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
-		return output, nil, invalidArguments("tool arguments contain trailing data")
+	if err := schema.Validate(instance); err != nil {
+		return output, invalidArguments("tool arguments do not match the declared schema")
 	}
-	var fields map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &fields); err != nil || fields == nil {
-		return output, nil, invalidArguments("tool arguments must be a JSON object")
+	if err := json.Unmarshal(raw, &output); err != nil {
+		return output, invalidArguments("tool arguments exceed supported value ranges")
 	}
-	return output, fields, nil
+	return output, nil
 }
 
 func decodeOpenArguments(raw json.RawMessage) (service.OpenInput, *core.AppError) {
-	input, fields, err := decodeArguments[service.OpenInput](raw)
-	if err != nil {
-		return input, err
-	}
-	if _, present := fields["path"]; !present || input.Path == "" {
-		return input, invalidArguments("path is required")
-	}
-	if _, present := fields["format"]; present && input.Format == "" {
-		return input, invalidArguments("format cannot be empty")
-	}
-	if _, present := fields["validation"]; present && input.Validation == "" {
-		return input, invalidArguments("validation cannot be empty")
-	}
-	return input, nil
+	return decodeArguments[service.OpenInput](raw, openArgumentsSchema)
 }
-
 func decodeReadArguments(raw json.RawMessage) (service.ReadInput, *core.AppError) {
-	input, fields, err := decodeArguments[service.ReadInput](raw)
-	if err != nil {
-		return input, err
-	}
-	_, hasCursor := fields["cursor"]
-	if hasCursor {
-		if input.Cursor == "" {
-			return input, invalidArguments("cursor cannot be empty")
-		}
-		if hasAnyField(fields, "file_id", "path", "format", "language", "query", "max_items", "max_result_bytes") {
-			return input, invalidArguments("cursor continuation must be supplied by itself")
-		}
-		return input, nil
-	}
-
-	_, hasFileID := fields["file_id"]
-	_, hasPath := fields["path"]
-	if hasFileID == hasPath {
-		return input, invalidArguments("provide exactly one of file_id or path")
-	}
-	if hasFileID && input.FileID == "" {
-		return input, invalidArguments("file_id cannot be empty")
-	}
-	if hasPath && input.Path == "" {
-		return input, invalidArguments("path cannot be empty")
-	}
-	if _, present := fields["language"]; !present || input.Language == "" {
-		return input, invalidArguments("language is required")
-	}
-	queryValue, present := fields["query"]
-	if !present {
-		return input, invalidArguments("query is required; use an explicit empty string for the root Pointer")
-	}
-	if bytes.Equal(bytes.TrimSpace(queryValue), []byte("null")) {
-		return input, invalidArguments("query must be a string; use an explicit empty string for the root Pointer")
-	}
-	if hasFileID {
-		if _, present := fields["format"]; present {
-			return input, invalidArguments("format is only valid with an implicit path source")
-		}
-	} else if _, present := fields["format"]; present && input.Format == "" {
-		return input, invalidArguments("format cannot be empty")
-	}
-	if _, present := fields["max_items"]; present && input.MaxItems <= 0 {
-		return input, invalidArguments("max_items must be greater than zero")
-	}
-	if _, present := fields["max_result_bytes"]; present && input.MaxResultBytes <= 0 {
-		return input, invalidArguments("max_result_bytes must be greater than zero")
-	}
-	return input, nil
+	return decodeArguments[service.ReadInput](raw, readArgumentsSchema)
 }
-
 func decodeCloseArguments(raw json.RawMessage) (service.CloseInput, *core.AppError) {
-	input, fields, err := decodeArguments[service.CloseInput](raw)
-	if err != nil {
-		return input, err
-	}
-	if _, present := fields["file_id"]; !present || input.FileID == "" {
-		return input, invalidArguments("file_id is required")
-	}
-	return input, nil
-}
-
-func hasAnyField(fields map[string]json.RawMessage, names ...string) bool {
-	for _, name := range names {
-		if _, present := fields[name]; present {
-			return true
-		}
-	}
-	return false
+	return decodeArguments[service.CloseInput](raw, closeArgumentsSchema)
 }
 
 func invalidArguments(message string) *core.AppError {
@@ -207,27 +182,31 @@ func invalidArguments(message string) *core.AppError {
 }
 
 func successResult(output any) *mcp.CallToolResult {
-	encoded, err := json.Marshal(output)
-	if err != nil {
-		return errorResult(&core.AppError{Code: core.CodeInternal, Message: "cannot encode tool result"})
-	}
-	return &mcp.CallToolResult{
-		Content:           []mcp.Content{&mcp.TextContent{Text: string(encoded)}},
-		StructuredContent: output,
-	}
+	return &mcp.CallToolResult{Content: []mcp.Content{}, StructuredContent: output}
 }
 
 func errorResult(appErr *core.AppError) *mcp.CallToolResult {
-	encoded, err := json.Marshal(appErr)
-	if err != nil {
-		encoded = []byte(`{"code":"INTERNAL_ERROR","message":"cannot encode tool error"}`)
-		appErr = &core.AppError{Code: core.CodeInternal, Message: "cannot encode tool error"}
+	bounded := *appErr
+	bounded.Message = diagnosticText(bounded.Message)
+	bounded.Hint = diagnosticText(bounded.Hint)
+	if bounded.Location != nil {
+		location := *bounded.Location
+		location.Path = diagnosticText(location.Path)
+		bounded.Location = &location
 	}
-	return &mcp.CallToolResult{
-		Content:           []mcp.Content{&mcp.TextContent{Text: string(encoded)}},
-		StructuredContent: appErr,
-		IsError:           true,
+	return &mcp.CallToolResult{Content: []mcp.Content{}, StructuredContent: &bounded, IsError: true}
+}
+
+func diagnosticText(value string) string {
+	const maximum = 1024
+	if len(value) <= maximum {
+		return value
 	}
+	end := maximum
+	for end > 0 && !utf8.RuneStart(value[end]) {
+		end--
+	}
+	return value[:end]
 }
 
 func openInputSchema() map[string]any {
@@ -258,7 +237,7 @@ func readInputSchema() map[string]any {
 		"query":            map[string]any{"type": "string", "description": "Pointer or JSONPath expression. The empty string is the Pointer for the root value."},
 		"cursor":           map[string]any{"type": "string", "minLength": 1, "description": "Opaque process-scoped continuation returned by a previous json_read. Supply it by itself."},
 		"max_items":        map[string]any{"type": "integer", "minimum": 1, "description": "Optional per-page item cap, bounded by the server maximum."},
-		"max_result_bytes": map[string]any{"type": "integer", "minimum": 1, "description": "Optional hard byte cap for the serialized read result, bounded by the server maximum."},
+		"max_result_bytes": map[string]any{"type": "integer", "minimum": 1, "description": "Optional hard UTF-8 byte cap for the serialized structuredContent object, including paths, values, query, cursor, and statistics. Protocol envelopes and error diagnostics have separate overhead. Bounded by the server maximum."},
 	}
 	return map[string]any{
 		"type":                 "object",
@@ -286,7 +265,7 @@ func closeInputSchema() map[string]any {
 func formatSchema() map[string]any {
 	return map[string]any{
 		"type": "string", "enum": []string{"auto", "json", "jsonl", "json-seq"}, "default": "auto",
-		"description": "auto detects json, jsonl, or json-seq from the extension and a bounded sample, never JSONC/JSON5. json is one standard JSON value. jsonl requires exactly one standard JSON value on every physical line (blank lines are invalid) and is queried as a virtual array. json-seq uses ASCII record separator 0x1E and is queried as a virtual array.",
+		"description": "auto detects json, jsonl, or json-seq from the extension and a bounded sample. json is one standard JSON value. jsonl requires one standard JSON value per physical line and is queried as a virtual array. Blank lines are invalid. json-seq uses ASCII record separator 0x1E and is queried as a virtual array.",
 	}
 }
 

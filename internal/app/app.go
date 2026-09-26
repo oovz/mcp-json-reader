@@ -6,9 +6,9 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 
-	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/oovz/mcp-json-reader/v3/internal/core"
 	"github.com/oovz/mcp-json-reader/v3/internal/mcpserver"
 	"github.com/oovz/mcp-json-reader/v3/internal/service"
@@ -19,6 +19,15 @@ type Config struct {
 	Root    string
 	Version bool
 	Limits  core.Limits
+}
+
+const maxMCPFrameBytes = 16 * 1024 * 1024
+
+func stdioTransport() *mcpserver.StdioTransport {
+	return &mcpserver.StdioTransport{
+		Reader: newBoundedStdioReader(os.Stdin, maxMCPFrameBytes),
+		Writer: noCloseWriter{Writer: os.Stdout},
+	}
 }
 
 func ParseConfig(arguments []string, getenv func(string) string) (Config, error) {
@@ -38,9 +47,9 @@ func ParseConfig(arguments []string, getenv func(string) string) (Config, error)
 	flags.Int64Var(&config.Limits.MaxActiveKeyBytes, "max-active-key-bytes", limits.MaxActiveKeyBytes, "maximum retained member-name bytes across active objects")
 	flags.Int64Var(&config.Limits.MaxRecordBytes, "max-record-bytes", limits.MaxRecordBytes, "maximum bytes in one JSONL or JSON-sequence record")
 	flags.Int64Var(&config.Limits.MaxCandidateBytes, "max-candidate-bytes", limits.MaxCandidateBytes, "maximum bytes in one matched or filter candidate")
-	flags.Int64Var(&config.Limits.MaxResultBytes, "max-result-bytes", limits.MaxResultBytes, "maximum serialized json_read result bytes")
+	flags.Int64Var(&config.Limits.MaxResultBytes, "max-result-bytes", limits.MaxResultBytes, "maximum serialized json_read structuredContent bytes")
 	flags.IntVar(&config.Limits.MaxItems, "max-items", limits.MaxItems, "maximum matches returned per page")
-	flags.DurationVar(&config.Limits.MaxScanTime, "max-scan-time", limits.MaxScanTime, "maximum duration of one scan")
+	flags.DurationVar(&config.Limits.MaxScanTime, "max-scan-time", limits.MaxScanTime, "maximum request duration, including scan admission")
 	flags.Int64Var(&config.Limits.ProbeBytes, "probe-bytes", limits.ProbeBytes, "maximum prefix bytes examined by probe validation")
 	flags.IntVar(&config.Limits.ProbeRecords, "probe-records", limits.ProbeRecords, "maximum complete records examined by probe validation")
 	flags.IntVar(&config.Limits.MaxOpenFiles, "max-open-files", limits.MaxOpenFiles, "maximum process-scoped file handles")
@@ -87,7 +96,7 @@ func Run(ctx context.Context, arguments []string, stdout, stderr io.Writer, gete
 	}
 	defer func() { _ = manager.Shutdown() }()
 	server := mcpserver.New(service.New(manager, config.Limits, service.Options{}))
-	if err := server.Run(ctx, &mcp.StdioTransport{}); err != nil && !errors.Is(err, context.Canceled) {
+	if err := server.Run(ctx, stdioTransport()); err != nil && !errors.Is(err, context.Canceled) {
 		_, _ = fmt.Fprintln(stderr, "mcp-json-reader:", err)
 		return 1
 	}
@@ -111,9 +120,9 @@ Options:
   --max-active-key-bytes N     maximum retained key bytes across active objects
   --max-record-bytes N         maximum JSONL or JSON-sequence record bytes
   --max-candidate-bytes N      maximum bytes in one match/filter candidate
-  --max-result-bytes N         maximum serialized json_read result bytes
+  --max-result-bytes N         maximum serialized json_read structuredContent bytes
   --max-items N                maximum matches per page
-  --max-scan-time DURATION     maximum duration of one scan
+  --max-scan-time DURATION     maximum request duration, including scan admission
   --probe-bytes N              bounded probe prefix
   --probe-records N            bounded complete records per probe
   --max-open-files N           maximum process-scoped file handles

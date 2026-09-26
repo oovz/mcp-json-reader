@@ -9,14 +9,16 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/oovz/mcp-json-reader/v3/internal/core"
+	"github.com/oovz/mcp-json-reader/v3/internal/engine"
 	"github.com/oovz/mcp-json-reader/v3/internal/service"
 	"github.com/oovz/mcp-json-reader/v3/internal/source"
 )
 
-func TestServerListsV1ToolsAndReturnsStructuredToolErrors(t *testing.T) {
+func TestServerListsToolsAndReturnsStructuredToolErrors(t *testing.T) {
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "data.json"), []byte(`{"id":1}`), 0o600); err != nil {
 		t.Fatal(err)
@@ -86,8 +88,8 @@ func TestServerListsV1ToolsAndReturnsStructuredToolErrors(t *testing.T) {
 	if !ok || structured["code"] != string(core.CodeAccessDenied) {
 		t.Fatalf("structured error = %#v, want ACCESS_DENIED", failed.StructuredContent)
 	}
-	if len(failed.Content) != 1 {
-		t.Fatalf("error content = %#v, want one JSON text mirror", failed.Content)
+	if len(failed.Content) != 0 {
+		t.Fatalf("error content = %#v, want empty content with structured data", failed.Content)
 	}
 
 	opened, openCallErr := session.CallTool(ctx, &mcp.CallToolParams{Name: "json_open", Arguments: map[string]any{"path": "data.json", "format": "json"}})
@@ -224,4 +226,57 @@ func readDecodeError(raw json.RawMessage) *core.AppError {
 func closeDecodeError(raw json.RawMessage) *core.AppError {
 	_, err := decodeCloseArguments(raw)
 	return err
+}
+
+func TestStrictArgumentsRejectDuplicatesAndUnicode(t *testing.T) {
+	for _, raw := range []string{
+		`{"path":"data.json","path":"other.json"}`,
+		`{"path":"\uD800"}`,
+		`{"path":"data.json","format":"unlisted"}`,
+		`{"path":"data.json","validation":"unlisted"}`,
+	} {
+		if _, err := decodeOpenArguments(json.RawMessage(raw)); err == nil {
+			t.Fatalf("accepted %s", raw)
+		}
+	}
+}
+
+func TestStructuredOutputContractsValidate(t *testing.T) {
+	fixtures := []struct {
+		schema map[string]any
+		output any
+	}{
+		{openOutputSchema(), service.OpenOutput{FileID: "jf_test", RequestedFormat: core.FormatJSON, DetectedFormat: core.FormatJSON, Validation: source.ValidationInfo{Mode: core.ValidationFull, Complete: true}, Source: source.SourceInfo{ModifiedTime: "2026-09-07T00:00:00Z"}}},
+		{readOutputSchema(), service.ReadOutput{Language: core.QueryPointer, Query: "", Items: []engine.Item{}, Complete: true}},
+		{closeOutputSchema(), service.CloseOutput{FileID: "jf_test", Closed: true}},
+		{readOutputSchema(), &core.AppError{Code: core.CodeSyntax, Message: "invalid JSON"}},
+	}
+	for _, fixture := range fixtures {
+		result := successResult(fixture.output)
+		if appErr, ok := fixture.output.(*core.AppError); ok {
+			result = errorResult(appErr)
+		}
+		encoded, err := json.Marshal(result.StructuredContent)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var value any
+		if err := json.Unmarshal(encoded, &value); err != nil {
+			t.Fatal(err)
+		}
+		if err := mustResolveSchema(fixture.schema).Validate(value); err != nil {
+			t.Fatalf("output schema violation: %v\n%s", err, encoded)
+		}
+		if len(result.Content) != 0 {
+			t.Fatal("unexpected duplicate content")
+		}
+	}
+}
+
+func TestErrorDiagnosticsHaveBoundedUTF8(t *testing.T) {
+	result := errorResult(&core.AppError{Code: core.CodeSyntax, Message: strings.Repeat("😀", 10000)})
+	appErr := result.StructuredContent.(*core.AppError)
+	if len(appErr.Message) > 1024 || !utf8.ValidString(appErr.Message) {
+		t.Fatal("invalid diagnostic truncation")
+	}
 }
