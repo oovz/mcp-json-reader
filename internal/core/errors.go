@@ -1,6 +1,8 @@
 package core
 
 import (
+	"context"
+	"errors"
 	"time"
 )
 
@@ -49,6 +51,7 @@ type LimitDetail struct {
 // AppError is returned for failures that should be represented as MCP tool
 // errors rather than JSON-RPC protocol errors.
 type AppError struct {
+	Cause          error        `json:"-"` // preserves typed decoder/probe failures inside the process
 	Code           ErrorCode    `json:"code"`
 	Message        string       `json:"message"`
 	ExpectedFormat Format       `json:"expected_format,omitempty"`
@@ -60,6 +63,7 @@ type AppError struct {
 }
 
 func (e *AppError) Error() string { return e.Message }
+func (e *AppError) Unwrap() error { return e.Cause }
 
 // NewSyntaxError constructs an error for malformed standard JSON.
 func NewSyntaxError(message string) *AppError {
@@ -76,4 +80,11 @@ func ScanTimeLimitDetail(limit time.Duration) *LimitDetail {
 		milliseconds = 1
 	}
 	return &LimitDetail{Name: "max_scan_time", Limit: milliseconds, Value: milliseconds}
+}
+
+func ContextError(err error, limit time.Duration) *AppError {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return &AppError{Code: CodeResourceLimit, Message: "max_scan_time exceeded", Limit: ScanTimeLimitDetail(limit), Cause: err}
+	}
+	return &AppError{Code: CodeCancelled, Message: "operation cancelled", Cause: err}
 }

@@ -39,9 +39,16 @@ func (path Path) Pointer() string {
 			result.WriteString(strconv.FormatInt(segment.Index, 10))
 			continue
 		}
-		escaped := strings.ReplaceAll(segment.Name, "~", "~0")
-		escaped = strings.ReplaceAll(escaped, "/", "~1")
-		result.WriteString(escaped)
+		for index := 0; index < len(segment.Name); index++ {
+			switch segment.Name[index] {
+			case '~':
+				result.WriteString("~0")
+			case '/':
+				result.WriteString("~1")
+			default:
+				result.WriteByte(segment.Name[index])
+			}
+		}
 	}
 	return result.String()
 }
@@ -51,4 +58,29 @@ func (path Path) Append(segment PathSegment) Path {
 	copy(result, path)
 	result[len(path)] = segment
 	return result
+}
+
+// PointerJSONSize includes both RFC 6901 and JSON string escaping, without
+// constructing the potentially large pointer. Call it before retaining paths.
+func (path Path) PointerJSONSize() int64 {
+	size := int64(2)
+	for _, segment := range path {
+		size++ // slash separating path segments
+		if segment.Kind == SegmentIndex {
+			size += JSONIntegerSize(segment.Index)
+			continue
+		}
+		size += JSONStringSize(segment.Name) - 2
+		size += int64(strings.Count(segment.Name, "~") + strings.Count(segment.Name, "/"))
+	}
+	return size
+}
+
+// DiagnosticPointer omits a path that would enlarge an error beyond its
+// diagnostic budget. Byte/record coordinates remain available.
+func (path Path) DiagnosticPointer() string {
+	if path.PointerJSONSize() > 1024 {
+		return ""
+	}
+	return path.Pointer()
 }
