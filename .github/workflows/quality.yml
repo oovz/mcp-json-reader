@@ -1,0 +1,110 @@
+name: Quality gates
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+env:
+  GOTOOLCHAIN: local
+
+jobs:
+  test:
+    name: Test ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: Resolve and verify the pinned module graph
+        run: go mod download
+      - run: go mod verify
+      - run: go mod tidy -diff
+      - name: Check formatting
+        shell: bash
+        run: test -z "$(gofmt -l cmd internal)"
+      - run: go vet ./...
+      - name: Lint Go sources
+        if: runner.os == 'Linux'
+        run: go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.2 run ./...
+      - run: go test ./... -count=1 -timeout=5m
+      - run: go build -trimpath ./cmd/mcp-json-reader
+      - name: Test the npm launcher
+        run: npm test
+
+  race:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - run: go test -race ./... -count=1 -timeout=5m
+
+  fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: Execute accepted plans and parser fuzz targets
+        run: |
+          go test ./internal/engine -run='^$' -fuzz='^FuzzExecuteAcceptedPlans$' -fuzztime=15s -parallel=2
+          go test ./internal/query -run='^$' -fuzz='^FuzzCompileQueries$' -fuzztime=10s -parallel=2
+          go test ./internal/stream -run='^$' -fuzz='^FuzzValidateDocument$' -fuzztime=10s -parallel=2
+          go test ./internal/stream -run='^$' -fuzz='^FuzzRecordFramers$' -fuzztime=10s -parallel=2
+      - name: Record allocation and pagination benchmarks
+        shell: bash
+        run: go test ./internal/engine -run='^$' -bench='Benchmark(RejectedLongPath|PaginationPositions)' -benchmem -benchtime=1s | tee benchmarks.txt
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: benchmarks
+          path: benchmarks.txt
+          if-no-files-found: error
+
+  security:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: Install the pinned vulnerability scanner
+        run: go install golang.org/x/vuln/cmd/govulncheck@v1.8.0
+      - name: Scan reachable source and Linux binary dependencies
+        shell: bash
+        run: |
+          set -o pipefail
+          # Text mode makes vulnerability findings fail the gate; JSON mode exits 0.
+          govulncheck ./... | tee vulnerabilities-source.txt
+          CGO_ENABLED=0 go build -trimpath -o scan-target ./cmd/mcp-json-reader
+          govulncheck -mode=binary ./scan-target | tee vulnerabilities-binary.txt
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: vulnerability-reports
+          path: vulnerabilities-*.txt
+          if-no-files-found: warn

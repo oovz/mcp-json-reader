@@ -1,173 +1,117 @@
-name: Release binaries
+name: Release npm package
 
 on:
   push:
-    tags:
-      - 'v*'
+    tags: ['v*.*.*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  GOTOOLCHAIN: local
 
 jobs:
+  quality:
+    uses: ./.github/workflows/quality.yml
+
   build:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    env:
-      GOTOOLCHAIN: auto
+    needs: quality
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22.14.0'
+          package-manager-cache: false
+      - run: npm install --global npm@11.5.1
+      - name: Build native binaries and pack for npm
+        shell: bash
+        run: |
+          version="$(node -p 'require("./package.json").version')"
+          if [[ "$GITHUB_EVENT_NAME" == push ]]; then
+            test "$GITHUB_REF_NAME" = "v$version"
+          fi
+          node -e 'for (const t of require("./cli/targets.js").TARGETS) console.log(t.goos, t.goarch, t.directory, t.file)' > "$RUNNER_TEMP/targets"
+          while read -r goos goarch directory file; do
+            mkdir -p "cli/binaries/$directory"
+            CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" go build -trimpath \
+              -ldflags "-s -w -X github.com/oovz/mcp-json-reader/v3/internal/mcpserver.Version=$version" \
+              -o "cli/binaries/$directory/$file" ./cmd/mcp-json-reader
+          done < "$RUNNER_TEMP/targets"
+          mkdir -p "$RUNNER_TEMP/npm"
+          npm pack --ignore-scripts --pack-destination "$RUNNER_TEMP/npm"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: npm-package
+          path: ${{ runner.temp }}/npm/*.tgz
+          if-no-files-found: error
+
+  smoke:
+    needs: build
     strategy:
       fail-fast: false
       matrix:
         include:
-          - goos: linux
-            goarch: amd64
-            archive: tar.gz
-          - goos: linux
-            goarch: arm64
-            archive: tar.gz
-          - goos: darwin
-            goarch: amd64
-            archive: tar.gz
-          - goos: darwin
-            goarch: arm64
-            archive: tar.gz
-          - goos: windows
-            goarch: amd64
-            archive: zip
-          - goos: windows
-            goarch: arm64
-            archive: zip
-
+          - runner: ubuntu-24.04
+            arch: x64
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+          - runner: windows-2025
+            arch: x64
+          - runner: windows-11-arm
+            arch: arm64
+          - runner: macos-15-intel
+            arch: x64
+          - runner: macos-14
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 10
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v6
-
-      - name: Set up Go
-        uses: actions/setup-go@v6
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          go-version: '1.26.x'
-          cache: true
-
-      - name: Test
-        run: go test ./... -count=1
-        env:
-          GOTOOLCHAIN: auto
-
-      - name: Build binary
-        env:
-          GOOS: ${{ matrix.goos }}
-          GOARCH: ${{ matrix.goarch }}
-          CGO_ENABLED: '0'
-          GOTOOLCHAIN: auto
-        run: |
-          mkdir -p dist/package
-          suffix=""
-          if [ "$GOOS" = "windows" ]; then suffix=".exe"; fi
-          version="${GITHUB_REF_NAME#v}"
-          go build -trimpath -ldflags="-s -w -X github.com/oovz/mcp-json-reader/v3/internal/mcpserver.Version=${version}" -o "dist/package/mcp-json-reader${suffix}" ./cmd/mcp-json-reader
-          cp README.md LICENSE "dist/package/"
-
-      - name: Archive
-        env:
-          GOOS: ${{ matrix.goos }}
-          GOARCH: ${{ matrix.goarch }}
-          ARCHIVE: ${{ matrix.archive }}
-        run: |
-          name="mcp-json-reader_${GITHUB_REF_NAME}_${GOOS}_${GOARCH}"
-          if [ "$ARCHIVE" = "zip" ]; then
-            (cd dist/package && zip -r "../${name}.zip" .)
-          else
-            tar -C dist/package -czf "dist/${name}.tar.gz" .
-          fi
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v7
+          node-version: '22.14.0'
+          package-manager-cache: false
+      - run: npm install --global npm@11.5.1
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
-          name: mcp-json-reader-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: dist/*.${{ matrix.archive }}
-          if-no-files-found: error
+          name: npm-package
+          path: ${{ runner.temp }}/npm
+      - name: Test installed command at the supported runtime floor
+        shell: bash
+        env:
+          EXPECTED_ARCH: ${{ matrix.arch }}
+        run: |
+          test "$(node -p 'process.arch')" = "$EXPECTED_ARCH"
+          npm install --offline --ignore-scripts --no-audit --no-package-lock \
+            --prefix "$RUNNER_TEMP/install" "$RUNNER_TEMP"/npm/*.tgz
+          npm exec --offline --prefix "$RUNNER_TEMP/install" -- mcp-json-reader --version
 
-  release:
-    needs: build
-    runs-on: ubuntu-latest
+  publish:
+    needs: [build, smoke]
+    if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
     permissions:
-      contents: write
+      contents: read
+      id-token: write
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v6
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          fetch-depth: 0
-
-      - name: Download artifacts
-        uses: actions/download-artifact@v8
+          node-version: '22.14.0'
+          registry-url: 'https://registry.npmjs.org'
+          package-manager-cache: false
+      - run: npm install --global npm@11.5.1
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
-          path: dist
-          merge-multiple: true
-
-      - name: Create checksums
-        run: (cd dist && sha256sum * > SHA256SUMS)
-
-      - name: Build release notes
-        id: notes
-        run: |
-          # Find the previous tag before the current one.
-          previous_tag="$(git describe --tags --abbrev=0 "${GITHUB_REF_NAME}^" 2>/dev/null || true)"
-
-          {
-            echo "## Changes"
-            echo
-            if [ -n "$previous_tag" ]; then
-              echo "Commits since ${previous_tag}:"
-              echo
-              echo '```'
-              git log --pretty=format:'%h %s' "${previous_tag}..${GITHUB_REF_NAME}"
-              echo
-              echo '```'
-            else
-              echo '```'
-              git log --pretty=format:'%h %s' "${GITHUB_REF_NAME}"
-              echo
-              echo '```'
-            fi
-          } > release_notes.md
-
-      - name: Publish GitHub release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" dist/* --notes-file release_notes.md --verify-tag
-
-  verify-module:
-    name: Verify Go module
-    needs: release
-    runs-on: ubuntu-latest
-    env:
-      GOTOOLCHAIN: auto
-    steps:
-      - name: Set up Go
-        uses: actions/setup-go@v6
-        with:
-          go-version: '1.26.x'
-          cache: false
-
-      - name: Verify go install works against the published tag
-        env:
-          GOTOOLCHAIN: auto
-        run: |
-          # The Go module proxy may take a few seconds to index the new tag.
-          # Poll until the version is available.
-          version="${GITHUB_REF_NAME}"
-          for i in $(seq 1 12); do
-            if go list -m "github.com/oovz/mcp-json-reader/v3@${version}" 2>/dev/null; then
-              echo "Module version ${version} is available on the proxy."
-              break
-            fi
-            echo "Waiting for proxy to index ${version}... (attempt $i/12)"
-            sleep 10
-          done
-
-          go install "github.com/oovz/mcp-json-reader/v3/cmd/mcp-json-reader@${version}"
-          installed_version="$(mcp-json-reader --version)"
-          expected_version="${version#v}"
-          echo "Installed: ${installed_version}"
-          echo "Expected:  mcp-json-reader ${expected_version}"
-          if [ "${installed_version}" != "mcp-json-reader ${expected_version}" ]; then
-            echo "::error::Installed version does not match tag"
-            exit 1
-          fi
+          name: npm-package
+          path: ${{ runner.temp }}/npm
+      - name: Publish the tested npm package
+        shell: bash
+        run: npm publish "$RUNNER_TEMP"/npm/*.tgz --access public --provenance
