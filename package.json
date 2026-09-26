@@ -1,0 +1,45 @@
+{
+  "name": "@oovz/mcp-json-reader",
+  "version": "3.0.0",
+  "description": "A bounded-memory MCP server for querying local JSON documents",
+  "license": "MIT",
+  "author": {
+    "name": "Otto",
+    "url": "https://github.com/oovz"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/oovz/mcp-json-reader"
+  },
+  "bugs": {
+    "url": "https://github.com/oovz/mcp-json-reader/issues"
+  },
+  "homepage": "https://github.com/oovz/mcp-json-reader#readme",
+  "engines": {
+    "node": ">=22.14.0",
+    "npm": ">=11.5.1"
+  },
+  "bin": {
+    "mcp-json-reader": "cli/mcp-json-reader.js"
+  },
+  "files": [
+    "cli/mcp-json-reader.js",
+    "cli/targets.js",
+    "cli/binaries/",
+    "README.md",
+    "LICENSE",
+    "SECURITY.md",
+    "SUPPORT.md",
+    "docs/jsonpath-profile.md",
+    "docs/performance.md"
+  ],
+  "scripts": {
+    "test": "node --test cli/*.test.js"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true,
+    "registry": "https://registry.npmjs.org"
+  },
+  "packageManager": "npm@11.5.1"
+}

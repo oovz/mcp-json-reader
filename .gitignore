@@ -1,12 +1,13 @@
 # Go build and test output
 /bin/
-/dist/
+/cli/binaries/
 *.test
 *.out
 coverage*.txt
 
 # Local task/build caches
 /.cache/
+/.devin/
 
 # Editors and operating systems
 .idea/
