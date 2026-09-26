@@ -16,9 +16,9 @@ func TestJSONPathFilterSelectsScalarMemberComparisons(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CompileJSONPath error: %v", err)
 	}
-	matches, selectErr := plan.SelectDOM(root, nil)
+	matches, selectErr := collectDOMMatches(plan, root)
 	if selectErr != nil {
-		t.Fatalf("SelectDOM error: %v", selectErr)
+		t.Fatalf("VisitFilterCandidate error: %v", selectErr)
 	}
 	if len(matches) != 1 || matches[0].Path.Pointer() != "/orders/1/id" || matches[0].Value != json.Number("2") {
 		t.Fatalf("matches = %#v, want order 2 id", matches)
@@ -31,9 +31,9 @@ func TestJSONPathFilterUsesExactJSONNumberComparison(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CompileJSONPath error: %v", err)
 	}
-	matches, selectErr := plan.SelectDOM(root, nil)
+	matches, selectErr := collectDOMMatches(plan, root)
 	if selectErr != nil {
-		t.Fatalf("SelectDOM error: %v", selectErr)
+		t.Fatalf("VisitFilterCandidate error: %v", selectErr)
 	}
 	if len(matches) != 1 || matches[0].Value != json.Number("9007199254740993") {
 		t.Fatalf("matches = %#v, want exact larger integer", matches)
@@ -46,9 +46,9 @@ func TestJSONPathFilterSupportsExistenceNegationAndGrouping(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CompileJSONPath error: %v", err)
 	}
-	matches, selectErr := plan.SelectDOM(root, nil)
+	matches, selectErr := collectDOMMatches(plan, root)
 	if selectErr != nil {
-		t.Fatalf("SelectDOM error: %v", selectErr)
+		t.Fatalf("VisitFilterCandidate error: %v", selectErr)
 	}
 	if len(matches) != 2 || matches[0].Path.Pointer() != "/1/id" || matches[1].Path.Pointer() != "/2/id" {
 		t.Fatalf("matches = %#v, want ids 2 and 3", matches)
@@ -70,7 +70,7 @@ func TestJSONPathFilterAllowsDollarSignInsideStringLiteral(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CompileJSONPath error: %v", err)
 	}
-	matches, selectErr := plan.SelectDOM(root, nil)
+	matches, selectErr := collectDOMMatches(plan, root)
 	if selectErr != nil || len(matches) != 1 || matches[0].Value != json.Number("1") {
 		t.Fatalf("matches = %#v, error = %v, want USD id", matches, selectErr)
 	}
@@ -94,16 +94,16 @@ func TestJSONPathFilterOrderingTypeMismatchesFollowRFC9535(t *testing.T) {
 		if err != nil {
 			t.Fatalf("CompileJSONPath(%q) error: %v", test.expression, err)
 		}
-		matches, selectErr := plan.SelectDOM(root, nil)
+		matches, selectErr := collectDOMMatches(plan, root)
 		if selectErr != nil {
-			t.Fatalf("SelectDOM(%q) error = %v", test.expression, selectErr)
+			t.Fatalf("VisitFilterCandidate(%q) error = %v", test.expression, selectErr)
 		}
 		var paths []string
 		for _, match := range matches {
 			paths = append(paths, match.Path.Pointer())
 		}
 		if got := strings.Join(paths, ","); got != test.wantPaths {
-			t.Fatalf("SelectDOM(%q) paths = %q, want %q", test.expression, got, test.wantPaths)
+			t.Fatalf("VisitFilterCandidate(%q) paths = %q, want %q", test.expression, got, test.wantPaths)
 		}
 	}
 }
@@ -164,4 +164,14 @@ func decodeCandidate(t *testing.T, input string) any {
 		t.Fatalf("Decode candidate error: %v", err)
 	}
 	return value
+}
+
+// Collect only in tests, using the production visitor rather than a second evaluator.
+func collectDOMMatches(plan *JSONPathPlan, root any) ([]DOMMatch, *core.AppError) {
+	var matches []DOMMatch
+	_, err := visitDOMSelectors(DOMMatch{Value: root}, plan.selectors, 0, nil, func(match DOMMatch) bool {
+		matches = append(matches, match)
+		return true
+	})
+	return matches, err
 }

@@ -46,28 +46,28 @@ func TestFilterCapturePropagatesScanDeadlineIntoQueryEvaluation(t *testing.T) {
 	}
 }
 
-func TestExecutePreservesJSONPathPreorderAndPaginatesByMatch(t *testing.T) {
-	plan, compileErr := query.Compile(core.QueryJSONPath, "$..*")
-	if compileErr != nil {
-		t.Fatalf("Compile error: %v", compileErr)
+func TestExecutePreservesChildOrderAndPaginatesByMatch(t *testing.T) {
+	plan, err := query.Compile(core.QueryJSONPath, "$[*]")
+	if err != nil {
+		t.Fatal(err)
 	}
-	input := `{"a":{"b":1},"c":2}`
+	input := `[{"b":1},2,3]`
 	first, err := Execute(context.Background(), strings.NewReader(input), core.FormatJSON, plan, core.DefaultLimits(), PageOptions{MaxItems: 2})
 	if err != nil {
-		t.Fatalf("first Execute error: %v", err)
+		t.Fatal(err)
 	}
-	if !first.More || len(first.Items) != 2 || first.Items[0].Path != "/a" || first.Items[1].Path != "/a/b" {
-		t.Fatalf("first page = %#v, want /a then /a/b with continuation", first)
+	if !first.More || len(first.Items) != 2 || first.Items[0].Path != "/0" || first.Items[1].Path != "/1" {
+		t.Fatalf("first page: %#v", first)
 	}
 	if string(first.Items[0].Value) != `{"b":1}` {
-		t.Fatalf("parent capture = %s, want object", first.Items[0].Value)
+		t.Fatalf("object capture: %s", first.Items[0].Value)
 	}
-	second, secondErr := Execute(context.Background(), strings.NewReader(input), core.FormatJSON, plan, core.DefaultLimits(), PageOptions{Skip: 2, MaxItems: 2})
-	if secondErr != nil {
-		t.Fatalf("second Execute error: %v", secondErr)
+	second, err := Execute(context.Background(), strings.NewReader(input), core.FormatJSON, plan, core.DefaultLimits(), PageOptions{Skip: 2, MaxItems: 2})
+	if err != nil {
+		t.Fatal(err)
 	}
-	if second.More || len(second.Items) != 1 || second.Items[0].Path != "/c" {
-		t.Fatalf("second page = %#v, want /c complete", second)
+	if second.More || len(second.Items) != 1 || second.Items[0].Path != "/2" {
+		t.Fatalf("second page: %#v", second)
 	}
 }
 

@@ -19,8 +19,6 @@ func TestCompileJSONPathMatchesForwardStreamingSelectors(t *testing.T) {
 		{"$['a,b']", core.Path{core.PropertySegment("a,b")}, true},
 		{"$.orders[1:6:2]", core.Path{core.PropertySegment("orders"), core.IndexSegment(5)}, true},
 		{"$.orders[1:6:2]", core.Path{core.PropertySegment("orders"), core.IndexSegment(4)}, false},
-		{"$..id", core.Path{core.PropertySegment("orders"), core.IndexSegment(2), core.PropertySegment("id")}, true},
-		{"$..*", core.Path{core.PropertySegment("orders"), core.IndexSegment(2)}, true},
 	}
 	for _, test := range tests {
 		plan, err := CompileJSONPath(test.expression)
@@ -42,7 +40,7 @@ func TestCompileJSONPathRejectsNonStreamingProfileFeatures(t *testing.T) {
 		`$["a","b"]`,
 		"$.items[?length(@) > 0]",
 		"$.items[?$.limit < @.value]",
-		"$..*..id",
+		"$..*..id", "$..id", "$..*",
 		"$.items[?@.active]..id",
 		"$..item.id",
 	} {
@@ -56,7 +54,7 @@ func TestCompileJSONPathRejectsNonStreamingProfileFeatures(t *testing.T) {
 func TestCompileJSONPathCapsFilterComplexity(t *testing.T) {
 	expressions := []string{
 		"$[?" + strings.Repeat("@.active == true || ", 65) + "@.active == true]",
-		"$[?" + strings.Repeat("!", 129) + "@.active]",
+		"$[?" + strings.Repeat("!@.active || ", 43) + "!@.active]",
 		"$[?" + strings.Repeat("(", 65) + "@.active" + strings.Repeat(")", 65) + "]",
 		"$[?@" + strings.Repeat(".a", 65) + "]",
 	}

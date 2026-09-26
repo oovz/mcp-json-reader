@@ -89,39 +89,33 @@ func (predicate comparisonPredicate) evaluate(candidate any, checkpoint Checkpoi
 	}
 	left, leftExists := predicate.left.resolve(candidate)
 	right, rightExists := predicate.right.resolve(candidate)
-	if !leftExists || !rightExists {
-		return false, nil
-	}
-	comparison, comparable, err := compareScalars(left, right)
-	if err != nil {
-		return false, err
-	}
-	if isOrderingOperator(predicate.operator) && !orderableScalarPair(left, right) {
-		if predicate.operator == "<=" || predicate.operator == ">=" {
-			return comparable && comparison == 0, nil
+	equal, less, greater := !leftExists && !rightExists, false, false
+	if leftExists && rightExists {
+		comparison, comparable, err := compareScalars(left, right)
+		if err != nil {
+			return false, err
 		}
-		return false, nil
+		equal = comparable && comparison == 0
+		if comparable && orderableScalarPair(left, right) {
+			less, greater = comparison < 0, comparison > 0
+		}
 	}
 	switch predicate.operator {
 	case "==":
-		return comparable && comparison == 0, nil
+		return equal, nil
 	case "!=":
-		return !comparable || comparison != 0, nil
+		return !equal, nil
 	case "<":
-		return comparable && comparison < 0, nil
+		return less, nil
 	case "<=":
-		return comparable && comparison <= 0, nil
+		return less || equal, nil
 	case ">":
-		return comparable && comparison > 0, nil
+		return greater, nil
 	case ">=":
-		return comparable && comparison >= 0, nil
+		return greater || equal, nil
 	default:
 		return false, &core.AppError{Code: core.CodeInternal, Message: "unknown filter comparison operator"}
 	}
-}
-
-func isOrderingOperator(operator string) bool {
-	return operator == "<" || operator == "<=" || operator == ">" || operator == ">="
 }
 
 func orderableScalarPair(left, right any) bool {
@@ -206,12 +200,12 @@ func (parser *filterParser) parseOr() (filterPredicate, *core.AppError) {
 }
 
 func (parser *filterParser) parseAnd() (filterPredicate, *core.AppError) {
-	left, err := parser.parseUnary()
+	left, err := parser.parseBasic()
 	if err != nil {
 		return nil, err
 	}
 	for parser.consume("&&") {
-		right, rightErr := parser.parseUnary()
+		right, rightErr := parser.parseBasic()
 		if rightErr != nil {
 			return nil, rightErr
 		}
@@ -223,25 +217,21 @@ func (parser *filterParser) parseAnd() (filterPredicate, *core.AppError) {
 	return left, nil
 }
 
-func (parser *filterParser) parseUnary() (filterPredicate, *core.AppError) {
-	parser.skipSpace()
-	if parser.has("!") && !parser.has("!=") {
+func (parser *filterParser) parseBasic() (filterPredicate, *core.AppError) {
+	negated := parser.consume("!")
+	if negated {
 		if nodeErr := parser.addPredicateNode(); nodeErr != nil {
 			return nil, nodeErr
 		}
-		parser.pos++
-		inner, err := parser.parseUnary()
-		if err != nil {
-			return nil, err
-		}
-		return notPredicate{inner: inner}, nil
 	}
+	var inner filterPredicate
+	var err *core.AppError
 	if parser.consume("(") {
 		parser.nesting++
 		if parser.nesting > maxFilterNesting {
 			return nil, unsupportedJSONPath("filter expressions support at most 64 nested groups")
 		}
-		inner, err := parser.parseOr()
+		inner, err = parser.parseOr()
 		if err != nil {
 			parser.nesting--
 			return nil, err
@@ -251,12 +241,19 @@ func (parser *filterParser) parseUnary() (filterPredicate, *core.AppError) {
 			return nil, jsonPathSyntaxError("unterminated parenthesized filter expression")
 		}
 		parser.nesting--
-		return inner, nil
+	} else {
+		inner, err = parser.parseTest(negated)
+		if err != nil {
+			return nil, err
+		}
 	}
-	return parser.parseTest()
+	if negated {
+		return notPredicate{inner: inner}, nil
+	}
+	return inner, nil
 }
 
-func (parser *filterParser) parseTest() (filterPredicate, *core.AppError) {
+func (parser *filterParser) parseTest(negated bool) (filterPredicate, *core.AppError) {
 	left, err := parser.parseOperand()
 	if err != nil {
 		return nil, err
@@ -270,6 +267,9 @@ func (parser *filterParser) parseTest() (filterPredicate, *core.AppError) {
 			return nil, nodeErr
 		}
 		return existencePredicate{operand: left}, nil
+	}
+	if negated {
+		return nil, jsonPathSyntaxError("a negated comparison must be parenthesized")
 	}
 	right, rightErr := parser.parseOperand()
 	if rightErr != nil {
@@ -338,6 +338,10 @@ func (parser *filterParser) parsePathOperand() (filterOperand, *core.AppError) {
 	parser.pos++
 	var segments core.Path
 	for parser.pos < len(parser.input) {
+		parser.skipSpace()
+		if parser.pos == len(parser.input) {
+			break
+		}
 		if parser.input[parser.pos] == '.' {
 			parser.pos++
 			name, next := readFilterIdentifier(parser.input, parser.pos)
@@ -356,7 +360,7 @@ func (parser *filterParser) parsePathOperand() (filterOperand, *core.AppError) {
 			if err != nil {
 				return nil, err
 			}
-			content = strings.TrimSpace(content)
+			content = strings.Trim(content, jsonPathWhitespace)
 			if content != "" && (content[0] == '\'' || content[0] == '"') {
 				name, nameErr := parseJSONPathString(content)
 				if nameErr != nil {
@@ -371,7 +375,7 @@ func (parser *filterParser) parsePathOperand() (filterOperand, *core.AppError) {
 					return nil, jsonPathSyntaxError("invalid filter array index")
 				}
 				index, indexErr := strconv.ParseInt(content, 10, 64)
-				if indexErr != nil || index < 0 {
+				if indexErr != nil || index < 0 || index > maxJSONPathInteger {
 					return nil, jsonPathSyntaxError("invalid filter array index")
 				}
 				segments = append(segments, core.IndexSegment(index))
@@ -511,9 +515,18 @@ func compareScalars(left, right any) (int, bool, *core.AppError) {
 			return -1, true, nil
 		}
 		return 1, true, nil
+	case []any:
+		if _, sameType := right.([]any); !sameType {
+			return 0, false, nil
+		}
+	case map[string]any:
+		if _, sameType := right.(map[string]any); !sameType {
+			return 0, false, nil
+		}
 	default:
-		return 0, false, &core.AppError{Code: core.CodeUnsupportedQueryFeature, Message: "deep container comparison is outside the streaming JSONPath profile"}
+		return 0, false, &core.AppError{Code: core.CodeInternal, Message: "invalid JSON comparison value"}
 	}
+	return 0, false, &core.AppError{Code: core.CodeUnsupportedQueryFeature, Message: "deep container comparison is outside the streaming JSONPath profile"}
 }
 
 type decimalNumber struct {

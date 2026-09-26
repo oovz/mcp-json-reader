@@ -75,11 +75,16 @@ func visitDOMSelectors(node DOMMatch, selectors []Selector, index int, checkpoin
 		if selector.HasEnd && selector.End < end {
 			end = selector.End
 		}
-		for childIndex := selector.Start; childIndex < end; childIndex += selector.Step {
+		for childIndex := selector.Start; childIndex < end; {
 			keepGoing, childErr := visit(DOMMatch{Path: node.Path.Append(core.IndexSegment(childIndex)), Value: array[childIndex]})
 			if childErr != nil || !keepGoing {
 				return keepGoing, childErr
 			}
+			// Compare before adding so even an internal oversized step cannot wrap.
+			if selector.Step >= end-childIndex {
+				break
+			}
+			childIndex += selector.Step
 		}
 		return true, nil
 	case SelectorFilter:
@@ -90,8 +95,6 @@ func visitDOMSelectors(node DOMMatch, selectors []Selector, index int, checkpoin
 			}
 			return visit(child)
 		})
-	case SelectorDescendantName, SelectorDescendantWildcard:
-		return false, unsupportedJSONPath("descendant selectors cannot follow filters in the streaming profile")
 	default:
 		return false, &core.AppError{Code: core.CodeInternal, Message: "unknown JSONPath selector"}
 	}
@@ -129,109 +132,4 @@ func visitDOMChildren(node DOMMatch, checkpoint Checkpoint, visitor func(DOMMatc
 		}
 	}
 	return true, nil
-}
-
-func (plan *JSONPathPlan) SelectDOM(root any, base core.Path) ([]DOMMatch, *core.AppError) {
-	nodes := []DOMMatch{{Path: append(core.Path(nil), base...), Value: root}}
-	for _, selector := range plan.selectors {
-		var next []DOMMatch
-		for _, node := range nodes {
-			selected, err := selectDOMChildren(node, selector)
-			if err != nil {
-				return nil, err
-			}
-			next = append(next, selected...)
-		}
-		nodes = next
-	}
-	return nodes, nil
-}
-
-func selectDOMChildren(node DOMMatch, selector Selector) ([]DOMMatch, *core.AppError) {
-	switch selector.Kind {
-	case SelectorName:
-		object, ok := node.Value.(map[string]any)
-		if !ok {
-			return nil, nil
-		}
-		value, exists := object[selector.Name]
-		if !exists {
-			return nil, nil
-		}
-		return []DOMMatch{{Path: node.Path.Append(core.PropertySegment(selector.Name)), Value: value}}, nil
-	case SelectorIndex:
-		array, ok := node.Value.([]any)
-		if !ok || selector.Index < 0 || selector.Index >= int64(len(array)) {
-			return nil, nil
-		}
-		return []DOMMatch{{Path: node.Path.Append(core.IndexSegment(selector.Index)), Value: array[selector.Index]}}, nil
-	case SelectorWildcard:
-		return allDOMChildren(node), nil
-	case SelectorSlice:
-		array, ok := node.Value.([]any)
-		if !ok {
-			return nil, nil
-		}
-		end := int64(len(array))
-		if selector.HasEnd && selector.End < end {
-			end = selector.End
-		}
-		var matches []DOMMatch
-		for index := selector.Start; index < end; index += selector.Step {
-			matches = append(matches, DOMMatch{Path: node.Path.Append(core.IndexSegment(index)), Value: array[index]})
-		}
-		return matches, nil
-	case SelectorDescendantName, SelectorDescendantWildcard:
-		var matches []DOMMatch
-		collectDescendants(node, selector, &matches)
-		return matches, nil
-	case SelectorFilter:
-		children := allDOMChildren(node)
-		var matches []DOMMatch
-		for _, child := range children {
-			selected, err := selector.predicate.evaluate(child.Value, nil)
-			if err != nil {
-				return nil, err
-			}
-			if selected {
-				matches = append(matches, child)
-			}
-		}
-		return matches, nil
-	default:
-		return nil, &core.AppError{Code: core.CodeInternal, Message: "unknown JSONPath selector"}
-	}
-}
-
-func allDOMChildren(node DOMMatch) []DOMMatch {
-	switch value := node.Value.(type) {
-	case []any:
-		matches := make([]DOMMatch, 0, len(value))
-		for index, child := range value {
-			matches = append(matches, DOMMatch{Path: node.Path.Append(core.IndexSegment(int64(index))), Value: child})
-		}
-		return matches
-	case map[string]any:
-		keys := make([]string, 0, len(value))
-		for key := range value {
-			keys = append(keys, key)
-		}
-		sort.Strings(keys)
-		matches := make([]DOMMatch, 0, len(keys))
-		for _, key := range keys {
-			matches = append(matches, DOMMatch{Path: node.Path.Append(core.PropertySegment(key)), Value: value[key]})
-		}
-		return matches
-	default:
-		return nil
-	}
-}
-
-func collectDescendants(node DOMMatch, selector Selector, matches *[]DOMMatch) {
-	for _, child := range allDOMChildren(node) {
-		if selector.Kind == SelectorDescendantWildcard || child.Path[len(child.Path)-1].Kind == core.SegmentProperty && child.Path[len(child.Path)-1].Name == selector.Name {
-			*matches = append(*matches, child)
-		}
-		collectDescendants(child, selector, matches)
-	}
 }
