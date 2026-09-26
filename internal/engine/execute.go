@@ -6,8 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"strings"
-	"time"
+	"math"
 
 	"github.com/oovz/mcp-json-reader/v3/internal/core"
 	"github.com/oovz/mcp-json-reader/v3/internal/query"
@@ -29,33 +28,34 @@ type PageOptions struct {
 	Skip           int64
 	MaxItems       int
 	MaxResultBytes int64
+	// ReservedBytes accounts for the structured service envelope before capture.
+	// The engine additionally accounts for the items array and every item.
+	ReservedBytes int64
 }
 
 type capture struct {
-	itemIndex int
-	buffer    bytes.Buffer
-	path      core.Path
-	filter    bool
+	buffer bytes.Buffer
+	path   core.Path
+	filter bool
 }
 
 type executionState struct {
-	plan             *query.Plan
-	limits           core.Limits
-	skip             int64
-	maxItems         int
-	maxResultBytes   int64
-	resultValueBytes int64
-	activeKeyBytes   int64
-	page             Page
-	active           []*capture
+	plan           *query.Plan
+	limits         core.Limits
+	skip           int64
+	maxItems       int
+	maxResultBytes int64
+	resultBytes    int64
+	page           Page
+	active         *capture
 }
 
 func Execute(ctx context.Context, source io.Reader, format core.Format, plan *query.Plan, limits core.Limits, options PageOptions) (Page, *core.AppError) {
 	if err := limits.Validate(); err != nil {
 		return Page{}, err
 	}
-	if options.Skip < 0 {
-		return Page{}, &core.AppError{Code: core.CodeInvalidArgument, Message: "skip cannot be negative"}
+	if plan == nil || options.Skip < 0 || options.ReservedBytes < 0 || options.MaxItems < 0 || options.MaxResultBytes < 0 {
+		return Page{}, &core.AppError{Code: core.CodeInvalidArgument, Message: "a compiled plan and non-negative page options are required"}
 	}
 	maxItems := options.MaxItems
 	if maxItems == 0 || maxItems > limits.MaxItems {
@@ -65,330 +65,240 @@ func Execute(ctx context.Context, source io.Reader, format core.Format, plan *qu
 	if maxResultBytes == 0 || maxResultBytes > limits.MaxResultBytes {
 		maxResultBytes = limits.MaxResultBytes
 	}
-	if maxItems <= 0 || maxResultBytes <= 0 {
-		return Page{}, &core.AppError{Code: core.CodeInvalidArgument, Message: "page limits must be positive"}
+	if options.ReservedBytes > maxResultBytes-2 {
+		return Page{}, resourceError("max_result_bytes", maxResultBytes, 0)
 	}
-	scanContext, cancel := context.WithTimeout(ctx, limits.MaxScanTime)
+	ctx, cancel := context.WithTimeout(ctx, limits.MaxScanTime)
 	defer cancel()
-	state := &executionState{plan: plan, limits: limits, skip: options.Skip, maxItems: maxItems, maxResultBytes: maxResultBytes}
+	state := &executionState{
+		plan: plan, limits: limits, skip: options.Skip, maxItems: maxItems,
+		maxResultBytes: maxResultBytes, resultBytes: options.ReservedBytes + 2,
+		page: Page{Items: []Item{}},
+	}
 	var executeErr *core.AppError
 	switch format {
 	case core.FormatJSON:
-		executeErr = executeDocument(scanContext, source, state, limits)
+		walker := stream.NewWalker(ctx, source, limits, state)
+		if _, executeErr = walker.Walk(nil); executeErr == nil && !state.Done() {
+			executeErr = walker.Finish()
+		}
 	case core.FormatJSONL:
-		executeErr = executeJSONL(scanContext, source, state, limits)
+		framer := stream.NewJSONLFramer(stream.CheckedReader(ctx, source), limits)
+		executeErr = executeVirtualArray(ctx, state, framer.Next, format)
 	case core.FormatJSONSequence:
-		executeErr = executeJSONSequence(scanContext, source, state, limits)
+		framer := stream.NewJSONSequenceFramer(stream.CheckedReader(ctx, source), limits)
+		executeErr = executeVirtualArray(ctx, state, framer.Next, format)
 	default:
 		executeErr = &core.AppError{Code: core.CodeInvalidArgument, Message: "Execute requires an explicit supported format"}
 	}
 	if executeErr != nil {
 		return Page{}, executeErr
 	}
+	if err := ctx.Err(); err != nil {
+		return Page{}, core.ContextError(err, limits.MaxScanTime)
+	}
 	return state.page, nil
 }
 
-func executeDocument(ctx context.Context, source io.Reader, state *executionState, limits core.Limits) *core.AppError {
-	decoder := newDecoder(ctx, source, limits)
-	if err := walkValue(ctx, decoder, state, nil); err != nil {
+func executeVirtualArray(ctx context.Context, state *executionState, next func() (*stream.RecordReader, error), format core.Format) *core.AppError {
+	if err := state.Begin(nil); err != nil {
 		return err
 	}
-	if state.pageReady() {
-		return nil
-	}
-	if _, err := decoder.Token(); err == nil {
-		return &core.AppError{Code: core.CodeFormatMismatch, Message: "expected one JSON document, but found another top-level value", ExpectedFormat: core.FormatJSON, LikelyFormats: []core.Format{core.FormatJSONL}, Retry: &core.Retry{Format: core.FormatJSONL}}
-	} else if !errors.Is(err, io.EOF) {
-		return decodeError(ctx, decoder, err, "", limits.MaxScanTime)
-	}
-	return nil
-}
-
-func executeJSONL(ctx context.Context, source io.Reader, state *executionState, limits core.Limits) *core.AppError {
-	framer := stream.NewJSONLFramer(&checkedReader{ctx: ctx, source: source}, limits)
-	return executeVirtualArray(ctx, state, func() (*stream.RecordReader, error) { return framer.Next() }, false, limits)
-}
-
-func executeJSONSequence(ctx context.Context, source io.Reader, state *executionState, limits core.Limits) *core.AppError {
-	framer := stream.NewJSONSequenceFramer(&checkedReader{ctx: ctx, source: source}, limits)
-	return executeVirtualArray(ctx, state, func() (*stream.RecordReader, error) { return framer.Next() }, true, limits)
-}
-
-func executeVirtualArray(ctx context.Context, state *executionState, next func() (*stream.RecordReader, error), jsonSequence bool, limits core.Limits) *core.AppError {
-	rootCapture, beginErr := state.begin(nil)
-	if beginErr != nil {
-		return beginErr
-	}
-	if emitErr := state.emit([]byte{'['}); emitErr != nil {
-		return emitErr
+	if err := state.Token(json.Delim('[')); err != nil {
+		return err
 	}
 	var index int64
 	for {
-		record, nextErr := next()
-		if errors.Is(nextErr, io.EOF) {
+		if err := ctx.Err(); err != nil {
+			return core.ContextError(err, state.limits.MaxScanTime)
+		}
+		record, err := next()
+		if errors.Is(err, io.EOF) {
 			break
 		}
-		if nextErr != nil {
-			return errorFrom(nextErr)
+		if err != nil {
+			return stream.SourceError(err, state.limits.MaxScanTime)
 		}
 		if index > 0 {
-			if emitErr := state.emit([]byte{','}); emitErr != nil {
-				return emitErr
+			if err := state.Token(json.Delim(',')); err != nil {
+				return err
 			}
 		}
-		decoder := newDecoder(ctx, record, limits)
-		if valueErr := walkValue(ctx, decoder, state, core.Path{core.IndexSegment(index)}); valueErr != nil {
-			return framedRecordError(record, valueErr, jsonSequence)
+		walker := stream.NewWalker(ctx, record, state.limits, state)
+		kind, walkErr := walker.Walk(core.Path{core.IndexSegment(index)})
+		if walkErr != nil {
+			return stream.RecordError(record, walkErr, format)
 		}
-		if state.pageReady() {
+		if state.Done() {
 			return nil
 		}
-		if _, trailingErr := decoder.Token(); trailingErr == nil {
-			format := core.FormatJSONL
-			if jsonSequence {
-				format = core.FormatJSONSequence
-			}
-			return &core.AppError{Code: core.CodeFormatMismatch, Message: "expected exactly one JSON value in the record", ExpectedFormat: format, Location: &core.Location{RecordIndex: core.Int64(record.Index())}}
-		} else if !errors.Is(trailingErr, io.EOF) {
-			return framedRecordError(record, decodeError(ctx, decoder, trailingErr, core.Path{core.IndexSegment(index)}.Pointer(), limits.MaxScanTime), jsonSequence)
+		if err := walker.Finish(); err != nil {
+			return stream.RecordError(record, err, format)
 		}
-		if jsonSequence && record.StartsWithNumber() && !record.EndsWithJSONWhitespace() {
-			return &core.AppError{Code: core.CodeSyntax, Message: "a top-level number in a JSON sequence must be followed by JSON whitespace", Location: &core.Location{ByteOffset: core.Int64(record.BytesRead()), RecordIndex: core.Int64(record.Index())}}
+		if err := stream.CheckRecordTerminator(record, kind, format); err != nil {
+			return err
 		}
 		index++
 	}
-	if emitErr := state.emit([]byte{']'}); emitErr != nil {
-		return emitErr
+	if err := state.Token(json.Delim(']')); err != nil {
+		return err
 	}
-	return state.end(ctx, rootCapture)
+	return state.End(ctx, nil)
 }
 
-func newDecoder(ctx context.Context, source io.Reader, limits core.Limits) *json.Decoder {
-	guard := stream.NewGuardReader(&checkedReader{ctx: ctx, source: source}, limits)
-	decoder := json.NewDecoder(guard)
-	decoder.UseNumber()
-	return decoder
-}
-
-func walkValue(ctx context.Context, decoder *json.Decoder, state *executionState, path core.Path) *core.AppError {
-	if err := ctx.Err(); err != nil {
-		return scanContextError(err, state.limits.MaxScanTime)
-	}
-	token, err := decoder.Token()
-	if err != nil {
-		return decodeError(ctx, decoder, err, path.Pointer(), state.limits.MaxScanTime)
-	}
-	started, beginErr := state.begin(path)
-	if beginErr != nil {
-		return beginErr
-	}
-	if state.pageReady() {
+// The supported selectors have a fixed depth before the first filter. Captures
+// therefore never overlap: the executor needs one active candidate, not a stack.
+func (state *executionState) Begin(path core.Path) *core.AppError {
+	if state.active != nil || state.page.More {
 		return nil
 	}
-
-	delimiter, isDelimiter := token.(json.Delim)
-	if !isDelimiter {
-		encoded, encodeErr := encodeScalar(token)
-		if encodeErr != nil {
-			return encodeErr
+	if state.plan.HasFilter() {
+		if state.plan.IsFilterCandidate(path) {
+			state.active = &capture{path: path, filter: true}
 		}
-		if emitErr := state.emit(encoded); emitErr != nil {
-			return emitErr
-		}
-		return state.end(ctx, started)
+		return nil
 	}
-
-	switch delimiter {
-	case '{':
-		if emitErr := state.emit([]byte{'{'}); emitErr != nil {
-			return emitErr
-		}
-		names := make(map[string]struct{})
-		var keyBytes int64
-		defer func() { state.activeKeyBytes -= keyBytes }()
-		first := true
-		for decoder.More() {
-			keyToken, keyErr := decoder.Token()
-			if keyErr != nil {
-				return decodeError(ctx, decoder, keyErr, path.Pointer(), state.limits.MaxScanTime)
-			}
-			key, ok := keyToken.(string)
-			if !ok {
-				return &core.AppError{Code: core.CodeSyntax, Message: "object member name must be a string", Location: &core.Location{ByteOffset: core.Int64(decoder.InputOffset()), Path: path.Pointer()}}
-			}
-			memberPath := path.Append(core.PropertySegment(key))
-			nextObjectKeyBytes := keyBytes + int64(len(key))
-			if nextObjectKeyBytes > state.limits.MaxObjectKeyBytes {
-				return &core.AppError{Code: core.CodeResourceLimit, Message: "max_object_key_bytes exceeded", Location: &core.Location{ByteOffset: core.Int64(decoder.InputOffset()), Path: memberPath.Pointer()}, Limit: &core.LimitDetail{Name: "max_object_key_bytes", Limit: state.limits.MaxObjectKeyBytes, Value: nextObjectKeyBytes}}
-			}
-			if _, duplicate := names[key]; duplicate {
-				return &core.AppError{Code: core.CodeSyntax, Message: "duplicate object member name: " + key, Location: &core.Location{ByteOffset: core.Int64(decoder.InputOffset()), Path: memberPath.Pointer()}}
-			}
-			nextActiveKeyBytes := state.activeKeyBytes + int64(len(key))
-			if nextActiveKeyBytes > state.limits.MaxActiveKeyBytes {
-				return &core.AppError{Code: core.CodeResourceLimit, Message: "max_active_key_bytes exceeded", Location: &core.Location{ByteOffset: core.Int64(decoder.InputOffset()), Path: memberPath.Pointer()}, Limit: &core.LimitDetail{Name: "max_active_key_bytes", Limit: state.limits.MaxActiveKeyBytes, Value: nextActiveKeyBytes}}
-			}
-			names[key] = struct{}{}
-			keyBytes = nextObjectKeyBytes
-			state.activeKeyBytes = nextActiveKeyBytes
-			if !first {
-				if emitErr := state.emit([]byte{','}); emitErr != nil {
-					return emitErr
-				}
-			}
-			first = false
-			encodedKey, _ := json.Marshal(key)
-			if emitErr := state.emit(encodedKey); emitErr != nil {
-				return emitErr
-			}
-			if emitErr := state.emit([]byte{':'}); emitErr != nil {
-				return emitErr
-			}
-			if childErr := walkValue(ctx, decoder, state, memberPath); childErr != nil {
-				return childErr
-			}
-			if state.pageReady() {
-				return nil
-			}
-		}
-		if _, closeErr := decoder.Token(); closeErr != nil {
-			return decodeError(ctx, decoder, closeErr, path.Pointer(), state.limits.MaxScanTime)
-		}
-		if emitErr := state.emit([]byte{'}'}); emitErr != nil {
-			return emitErr
-		}
-	case '[':
-		if emitErr := state.emit([]byte{'['}); emitErr != nil {
-			return emitErr
-		}
-		var index int64
-		for decoder.More() {
-			if index > 0 {
-				if emitErr := state.emit([]byte{','}); emitErr != nil {
-					return emitErr
-				}
-			}
-			if childErr := walkValue(ctx, decoder, state, path.Append(core.IndexSegment(index))); childErr != nil {
-				return childErr
-			}
-			if state.pageReady() {
-				return nil
-			}
-			index++
-		}
-		if _, closeErr := decoder.Token(); closeErr != nil {
-			return decodeError(ctx, decoder, closeErr, path.Pointer(), state.limits.MaxScanTime)
-		}
-		if emitErr := state.emit([]byte{']'}); emitErr != nil {
-			return emitErr
-		}
-	default:
-		return &core.AppError{Code: core.CodeSyntax, Message: "unexpected closing delimiter"}
+	if !state.plan.Matches(path) || !state.acceptMatch() {
+		return nil
 	}
-	return state.end(ctx, started)
+	if err := state.reserveItem(path); err != nil {
+		return err
+	}
+	state.page.Items = append(state.page.Items, Item{Path: path.Pointer()})
+	state.active = &capture{path: path}
+	return nil
 }
 
-func (state *executionState) begin(path core.Path) (*capture, *core.AppError) {
-	if state.plan.HasFilter() {
-		if state.page.More || !state.plan.IsFilterCandidate(path) {
-			return nil, nil
-		}
-		started := &capture{itemIndex: -1, path: append(core.Path(nil), path...), filter: true}
-		state.active = append(state.active, started)
-		return started, nil
-	}
-	if !state.plan.Matches(path) {
-		return nil, nil
-	}
+func (state *executionState) acceptMatch() bool {
 	state.page.Seen++
 	if state.page.Seen <= state.skip {
-		return nil, nil
+		return false
 	}
 	if len(state.page.Items) >= state.maxItems {
 		state.page.More = true
-		return nil, nil
+		return false
 	}
-	itemIndex := len(state.page.Items)
-	state.page.Items = append(state.page.Items, Item{Path: path.Pointer()})
-	started := &capture{itemIndex: itemIndex, path: append(core.Path(nil), path...)}
-	state.active = append(state.active, started)
-	return started, nil
+	return true
 }
 
-func (state *executionState) pageReady() bool {
-	return state.page.More && len(state.active) == 0
+func (state *executionState) Done() bool { return state.page.More && state.active == nil }
+
+func (state *executionState) reserve(count int64) *core.AppError {
+	if count > state.maxResultBytes-state.resultBytes {
+		return resourceError("max_result_bytes", state.maxResultBytes, 0)
+	}
+	state.resultBytes += count
+	return nil
 }
 
-func (state *executionState) emit(encoded []byte) *core.AppError {
-	for _, active := range state.active {
-		candidateSize := int64(active.buffer.Len() + len(encoded))
-		if candidateSize > state.limits.MaxCandidateBytes {
-			return resourceError("max_candidate_bytes", state.limits.MaxCandidateBytes, candidateSize)
+func (state *executionState) reserveItem(path core.Path) *core.AppError {
+	size := int64(len(`{"path":,"value":}`)) + path.PointerJSONSize()
+	if len(state.page.Items) > 0 {
+		size++
+	}
+	return state.reserve(size)
+}
+
+func (state *executionState) Token(token json.Token) *core.AppError {
+	if state.active == nil {
+		return nil
+	}
+	var size int64
+	delimiter, punctuation := token.(json.Delim)
+	if punctuation {
+		size = 1
+	} else {
+		var err error
+		size, err = core.JSONSize(token, math.MaxInt64)
+		if err != nil {
+			return &core.AppError{Code: core.CodeInternal, Message: "invalid scalar from structural walker", Cause: err}
 		}
-		if !active.filter {
-			state.resultValueBytes += int64(len(encoded))
-			if state.resultValueBytes > state.maxResultBytes {
-				return resourceError("max_result_bytes", state.maxResultBytes, state.resultValueBytes)
-			}
+	}
+	if size > state.limits.MaxCandidateBytes-int64(state.active.buffer.Len()) {
+		return resourceError("max_candidate_bytes", state.limits.MaxCandidateBytes, 0)
+	}
+	if !state.active.filter {
+		if err := state.reserve(size); err != nil {
+			return err
 		}
-		_, _ = active.buffer.Write(encoded)
+	}
+	// Every allocation below has an encoded-size check above it.
+	if punctuation {
+		_ = state.active.buffer.WriteByte(byte(delimiter))
+	} else if number, ok := token.(json.Number); ok {
+		_, _ = state.active.buffer.WriteString(string(number))
+	} else {
+		encoded, err := json.Marshal(token)
+		if err != nil {
+			return &core.AppError{Code: core.CodeInternal, Message: "cannot encode JSON scalar", Cause: err}
+		}
+		_, _ = state.active.buffer.Write(encoded)
 	}
 	return nil
 }
 
-func (state *executionState) end(ctx context.Context, started *capture) *core.AppError {
-	if started == nil {
+func (state *executionState) End(ctx context.Context, path core.Path) *core.AppError {
+	if state.active == nil || len(state.active.path) != len(path) {
 		return nil
 	}
-	if len(state.active) == 0 || state.active[len(state.active)-1] != started {
-		return &core.AppError{Code: core.CodeInternal, Message: "capture stack is inconsistent"}
+	captured := state.active
+	state.active = nil
+	if captured.filter {
+		return state.finishFilterCapture(ctx, captured)
 	}
-	state.active = state.active[:len(state.active)-1]
-	if started.filter {
-		return state.finishFilterCapture(ctx, started)
-	}
-	state.page.Items[started.itemIndex].Value = append(json.RawMessage(nil), started.buffer.Bytes()...)
+	// Transfer ownership of the buffer. No writer retains it after this point.
+	state.page.Items[len(state.page.Items)-1].Value = captured.buffer.Bytes()
 	return nil
 }
 
 func (state *executionState) finishFilterCapture(ctx context.Context, captured *capture) *core.AppError {
+	checkpoint := func() *core.AppError {
+		if err := ctx.Err(); err != nil {
+			return core.ContextError(err, state.limits.MaxScanTime)
+		}
+		return nil
+	}
+	if err := checkpoint(); err != nil {
+		return err
+	}
 	decoder := json.NewDecoder(bytes.NewReader(captured.buffer.Bytes()))
 	decoder.UseNumber()
 	var candidate any
 	if err := decoder.Decode(&candidate); err != nil {
-		return &core.AppError{Code: core.CodeInternal, Message: "failed to decode a bounded filter candidate"}
+		return &core.AppError{Code: core.CodeInternal, Message: "cannot decode validated filter candidate", Cause: err}
 	}
 	var visitErr *core.AppError
-	checkpoint := func() *core.AppError {
-		if err := ctx.Err(); err != nil {
-			return scanContextError(err, state.limits.MaxScanTime)
-		}
-		return nil
-	}
 	err := state.plan.VisitFilterCandidate(candidate, captured.path, checkpoint, func(match query.DOMMatch) bool {
-		state.page.Seen++
-		if state.page.Seen <= state.skip {
-			return true
+		if !state.acceptMatch() {
+			return !state.page.More
 		}
-		if len(state.page.Items) >= state.maxItems {
-			state.page.More = true
+		if visitErr = state.reserveItem(match.Path); visitErr != nil {
+			return false
+		}
+		budget := state.maxResultBytes - state.resultBytes
+		limitName := "max_result_bytes"
+		limit := state.maxResultBytes
+		if state.limits.MaxCandidateBytes < budget {
+			budget, limit, limitName = state.limits.MaxCandidateBytes, state.limits.MaxCandidateBytes, "max_candidate_bytes"
+		}
+		size, sizeErr := core.JSONSize(match.Value, budget)
+		if sizeErr != nil {
+			if errors.Is(sizeErr, core.ErrJSONSize) {
+				visitErr = resourceError(limitName, limit, 0)
+			} else {
+				visitErr = &core.AppError{Code: core.CodeInternal, Message: "cannot measure filtered value", Cause: sizeErr}
+			}
+			return false
+		}
+		if visitErr = state.reserve(size); visitErr != nil {
 			return false
 		}
 		encoded, encodeErr := json.Marshal(match.Value)
 		if encodeErr != nil {
-			visitErr = &core.AppError{Code: core.CodeInternal, Message: "failed to encode a filtered JSON value"}
+			visitErr = &core.AppError{Code: core.CodeInternal, Message: "cannot encode filtered value", Cause: encodeErr}
 			return false
 		}
-		if int64(len(encoded)) > state.limits.MaxCandidateBytes {
-			visitErr = resourceError("max_candidate_bytes", state.limits.MaxCandidateBytes, int64(len(encoded)))
-			return false
-		}
-		state.resultValueBytes += int64(len(encoded))
-		if state.resultValueBytes > state.maxResultBytes {
-			visitErr = resourceError("max_result_bytes", state.maxResultBytes, state.resultValueBytes)
-			return false
-		}
-		state.page.Items = append(state.page.Items, Item{Path: match.Path.Pointer(), Value: append(json.RawMessage(nil), encoded...)})
+		state.page.Items = append(state.page.Items, Item{Path: match.Path.Pointer(), Value: encoded})
 		return true
 	})
 	if err != nil {
@@ -397,84 +307,6 @@ func (state *executionState) finishFilterCapture(ctx context.Context, captured *
 	return visitErr
 }
 
-func framedRecordError(record *stream.RecordReader, err *core.AppError, jsonSequence bool) *core.AppError {
-	if err.Location == nil {
-		err.Location = &core.Location{}
-	}
-	err.Location.RecordIndex = core.Int64(record.Index())
-	if !jsonSequence && record.BytesRead() == 0 {
-		return &core.AppError{Code: core.CodeFormatMismatch, Message: "blank lines are not valid JSONL records", ExpectedFormat: core.FormatJSONL, Location: &core.Location{ByteOffset: core.Int64(0), RecordIndex: core.Int64(record.Index())}}
-	}
-	trimmed := strings.TrimSpace(record.Sample())
-	if !jsonSequence && record.Index() == 0 && err.Code == core.CodeSyntax && (trimmed == "{" || trimmed == "[") {
-		return &core.AppError{Code: core.CodeFormatMismatch, Message: "expected one complete JSON value on each non-empty line", ExpectedFormat: core.FormatJSONL, LikelyFormats: []core.Format{core.FormatJSON}, Retry: &core.Retry{Format: core.FormatJSON}, Location: &core.Location{ByteOffset: core.Int64(0), RecordIndex: core.Int64(0)}}
-	}
-	return err
-}
-
-func errorFrom(err error) *core.AppError {
-	var appErr *core.AppError
-	if errors.As(err, &appErr) {
-		return appErr
-	}
-	return &core.AppError{Code: core.CodeIO, Message: err.Error()}
-}
-
-func encodeScalar(token json.Token) ([]byte, *core.AppError) {
-	if number, ok := token.(json.Number); ok {
-		return []byte(number.String()), nil
-	}
-	encoded, err := json.Marshal(token)
-	if err != nil {
-		return nil, &core.AppError{Code: core.CodeInternal, Message: "failed to encode JSON scalar"}
-	}
-	return encoded, nil
-}
-
-func decodeError(ctx context.Context, decoder *json.Decoder, err error, path string, maxScanTime time.Duration) *core.AppError {
-	var appErr *core.AppError
-	if errors.As(err, &appErr) {
-		if appErr.Location != nil && appErr.Location.Path == "" {
-			appErr.Location.Path = path
-		}
-		return appErr
-	}
-	if contextErr := ctx.Err(); contextErr != nil {
-		return scanContextError(contextErr, maxScanTime)
-	}
-	location := &core.Location{ByteOffset: core.Int64(decoder.InputOffset()), Path: path}
-	var syntaxErr *json.SyntaxError
-	if errors.As(err, &syntaxErr) {
-		location.ByteOffset = core.Int64(syntaxErr.Offset - 1)
-	}
-	message := err.Error()
-	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
-		message = "unexpected end of JSON input"
-	}
-	result := core.NewSyntaxError(message)
-	result.Location = location
-	return result
-}
-
 func resourceError(name string, limit, value int64) *core.AppError {
 	return &core.AppError{Code: core.CodeResourceLimit, Message: name + " exceeded", Limit: &core.LimitDetail{Name: name, Limit: limit, Value: value}}
-}
-
-func scanContextError(err error, maxScanTime time.Duration) *core.AppError {
-	if errors.Is(err, context.DeadlineExceeded) {
-		return &core.AppError{Code: core.CodeResourceLimit, Message: "max_scan_time exceeded", Limit: core.ScanTimeLimitDetail(maxScanTime)}
-	}
-	return &core.AppError{Code: core.CodeCancelled, Message: "operation cancelled"}
-}
-
-type checkedReader struct {
-	ctx    context.Context
-	source io.Reader
-}
-
-func (reader *checkedReader) Read(buffer []byte) (int, error) {
-	if err := reader.ctx.Err(); err != nil {
-		return 0, err
-	}
-	return reader.source.Read(buffer)
 }

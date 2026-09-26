@@ -65,11 +65,6 @@ type AppError struct {
 func (e *AppError) Error() string { return e.Message }
 func (e *AppError) Unwrap() error { return e.Cause }
 
-// NewSyntaxError constructs an error for malformed standard JSON.
-func NewSyntaxError(message string) *AppError {
-	return &AppError{Code: CodeSyntax, Message: message}
-}
-
 // Int64 returns a pointer suitable for an optional numeric response field.
 func Int64(value int64) *int64 { return &value }
 
