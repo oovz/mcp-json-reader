@@ -13,16 +13,15 @@ const recordBufferSize = 32 << 10
 // RecordReader exposes exactly one framed record. The delimiter is consumed by
 // the framer and is never returned to the JSON decoder.
 type RecordReader struct {
-	reader    *bufio.Reader
-	delimiter byte
-	index     int64
-	limit     int64
-	read      int64
-	lastByte  byte
-	hasByte   bool
-	sample    []byte
-	firstByte byte
-	hasFirst  bool
+	reader       *bufio.Reader
+	delimiter    byte
+	index        int64
+	limit        int64
+	read         int64
+	lastByte     byte
+	hasByte      bool
+	hasDelimiter bool
+	sample       []byte
 
 	pending []byte
 	nextErr error
@@ -50,10 +49,6 @@ func (record *RecordReader) EndsWithJSONWhitespace() bool {
 
 func (record *RecordReader) Sample() string { return string(record.sample) }
 
-func (record *RecordReader) StartsWithNumber() bool {
-	return record.hasFirst && (record.firstByte == '-' || record.firstByte >= '0' && record.firstByte <= '9')
-}
-
 func (record *RecordReader) Read(buffer []byte) (int, error) {
 	if len(buffer) == 0 {
 		return 0, nil
@@ -79,6 +74,7 @@ func (record *RecordReader) fill() {
 	fragment, err := record.reader.ReadSlice(record.delimiter)
 	if err == nil {
 		fragment = fragment[:len(fragment)-1]
+		record.hasDelimiter = true
 		record.done = true
 		if record.onDelimiter != nil {
 			record.onDelimiter()
@@ -117,18 +113,6 @@ func (record *RecordReader) fill() {
 	if len(fragment) > 0 {
 		record.lastByte = fragment[len(fragment)-1]
 		record.hasByte = true
-		if !record.hasFirst {
-			for _, value := range fragment {
-				switch value {
-				case ' ', '\t', '\r', '\n':
-					continue
-				default:
-					record.firstByte = value
-					record.hasFirst = true
-				}
-				break
-			}
-		}
 		if len(record.sample) < 256 {
 			remainingSample := 256 - len(record.sample)
 			if len(fragment) < remainingSample {
@@ -218,6 +202,24 @@ func (framer *JSONSequenceFramer) Next() (*RecordReader, error) {
 		framer.pendingRS = false
 	} else {
 		return nil, io.EOF
+	}
+
+	// RFC 7464: a run of RS bytes introduces the next JSON text.
+	// Separators by themselves never create an empty record.
+	for {
+		prefix, err := framer.reader.Peek(1)
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				framer.exhausted = true
+			}
+			return nil, err
+		}
+		if prefix[0] != 0x1e {
+			break
+		}
+		if _, err := framer.reader.ReadByte(); err != nil {
+			return nil, err
+		}
 	}
 
 	record := &RecordReader{

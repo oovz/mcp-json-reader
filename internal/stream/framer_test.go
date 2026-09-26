@@ -79,10 +79,10 @@ func TestJSONSequenceFramerAcceptsAnEmptySequenceAndPropagatesReadErrors(t *test
 	}
 }
 
-func TestJSONSequenceFramerExposesAnEmptyRecordBetweenConsecutiveRS(t *testing.T) {
+func TestJSONSequenceFramerSkipsConsecutiveRS(t *testing.T) {
 	input := string([]byte{0x1e}) + "{\"id\":1}\n" + string([]byte{0x1e, 0x1e}) + "42\n"
 	framer := NewJSONSequenceFramer(strings.NewReader(input), core.DefaultLimits())
-	for index, want := range []string{"{\"id\":1}\n", "", "42\n"} {
+	for index, want := range []string{"{\"id\":1}\n", "42\n"} {
 		record, err := framer.Next()
 		if err != nil {
 			t.Fatalf("Next(%d) error: %v", index, err)

@@ -73,10 +73,17 @@ func TestValidateSourceAbortsMalformedJSONSequenceRecord(t *testing.T) {
 	}
 }
 
-func TestValidateSourceRejectsEmptyJSONSequenceRecord(t *testing.T) {
-	input := string([]byte{0x1e}) + "{\"id\":1}\n" + string([]byte{0x1e, 0x1e}) + "{\"id\":2}\n"
-	_, err := ValidateSource(context.Background(), strings.NewReader(input), core.FormatJSONSequence, core.DefaultLimits())
-	if err == nil || err.Code != core.CodeSyntax || err.Location == nil || err.Location.RecordIndex == nil || *err.Location.RecordIndex != 1 {
-		t.Fatalf("error = %#v, want record 1 SYNTAX_ERROR", err)
+func TestValidateSourceSkipsConsecutiveSeparators(t *testing.T) {
+	for _, input := range []string{"\x1e\x1e{\"id\":1}\n\x1e\x1e{\"id\":2}\n", "\x1e{\"id\":1}\n\x1e{\"id\":2}\n\x1e\x1e"} {
+		summary, err := ValidateSource(context.Background(), strings.NewReader(input), core.FormatJSONSequence, core.DefaultLimits())
+		if err != nil || summary.Records != 2 {
+			t.Fatalf("summary=%#v error=%v", summary, err)
+		}
+	}
+	for _, input := range []string{"\x1e", "\x1e\x1e"} {
+		summary, err := ValidateSource(context.Background(), strings.NewReader(input), core.FormatJSONSequence, core.DefaultLimits())
+		if err != nil || summary.Records != 0 {
+			t.Fatalf("summary=%#v error=%v", summary, err)
+		}
 	}
 }

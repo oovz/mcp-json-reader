@@ -153,6 +153,7 @@ func (reader *GuardReader) scanByte(value byte) error {
 	} else if value == '\\' {
 		reader.escaped = true
 	}
+
 	return nil
 }
 

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"strings"
+	"time"
 
 	"github.com/oovz/mcp-json-reader/v3/internal/core"
 )
@@ -22,6 +23,7 @@ func ValidateSource(ctx context.Context, source io.Reader, format core.Format, l
 	}
 	scanContext, cancel := context.WithTimeout(ctx, limits.MaxScanTime)
 	defer cancel()
+	source = CheckedReader(scanContext, source)
 
 	switch format {
 	case core.FormatJSON:
@@ -44,23 +46,34 @@ func validateJSONL(ctx context.Context, source io.Reader, limits core.Limits) (V
 	var records int64
 	for {
 		record, nextErr := framer.Next()
+		if err := ctx.Err(); err != nil {
+			return ValidationSummary{}, core.ContextError(err, limits.MaxScanTime)
+		}
 		if errors.Is(nextErr, io.EOF) {
 			return ValidationSummary{RootKind: RootArray, Records: records}, nil
 		}
 		if nextErr != nil {
-			return ValidationSummary{}, asAppError(nextErr)
+			return ValidationSummary{}, SourceError(nextErr, limits.MaxScanTime)
 		}
 
 		_, recordErr := ValidateDocument(ctx, record, limits)
 		if recordErr != nil {
-			return ValidationSummary{}, jsonlRecordError(record, recordErr)
+			return ValidationSummary{}, RecordError(record, recordErr, core.FormatJSONL)
 		}
 		records++
 	}
 }
 
-func jsonlRecordError(record *RecordReader, err *core.AppError) *core.AppError {
-	if record.BytesRead() == 0 {
+func RecordError(record *RecordReader, err *core.AppError, format core.Format) *core.AppError {
+	if format == core.FormatJSONSequence {
+		if err.Code == core.CodeFormatMismatch {
+			err.ExpectedFormat, err.LikelyFormats, err.Retry = format, nil, nil
+			err.Message = "expected exactly one complete JSON value in the JSON sequence record"
+		}
+		setRecordIndex(err, record.Index())
+		return err
+	}
+	if err.Code == core.CodeSyntax && record.hasDelimiter && record.BytesRead() == 0 {
 		return &core.AppError{
 			Code:           core.CodeFormatMismatch,
 			Message:        "blank lines are not valid JSONL records",
@@ -69,7 +82,7 @@ func jsonlRecordError(record *RecordReader, err *core.AppError) *core.AppError {
 		}
 	}
 	trimmed := strings.TrimSpace(record.Sample())
-	if record.Index() == 0 && err.Code == core.CodeSyntax && (trimmed == "{" || trimmed == "[") {
+	if record.hasDelimiter && record.Index() == 0 && err.Code == core.CodeSyntax && (trimmed == "{" || trimmed == "[") {
 		return &core.AppError{
 			Code:           core.CodeFormatMismatch,
 			Message:        "expected one complete JSON value on each non-empty line",
@@ -94,28 +107,22 @@ func validateJSONSequence(ctx context.Context, source io.Reader, limits core.Lim
 	var records int64
 	for {
 		record, nextErr := framer.Next()
+		if err := ctx.Err(); err != nil {
+			return ValidationSummary{}, core.ContextError(err, limits.MaxScanTime)
+		}
 		if errors.Is(nextErr, io.EOF) {
 			return ValidationSummary{RootKind: RootArray, Records: records}, nil
 		}
 		if nextErr != nil {
-			return ValidationSummary{}, asAppError(nextErr)
+			return ValidationSummary{}, SourceError(nextErr, limits.MaxScanTime)
 		}
 
 		info, recordErr := ValidateDocument(ctx, record, limits)
 		if recordErr != nil {
-			setRecordIndex(recordErr, record.Index())
-			return ValidationSummary{}, recordErr
+			return ValidationSummary{}, RecordError(record, recordErr, core.FormatJSONSequence)
 		}
-		if info.RootKind == RootNumber && !record.EndsWithJSONWhitespace() {
-			return ValidationSummary{}, &core.AppError{
-				Code:    core.CodeSyntax,
-				Message: "a top-level number in a JSON sequence must be followed by JSON whitespace",
-				Location: &core.Location{
-					ByteOffset:  core.Int64(record.BytesRead()),
-					RecordIndex: core.Int64(record.Index()),
-				},
-				Hint: "The record may have been truncated; terminate the number with LF.",
-			}
+		if err := CheckRecordTerminator(record, info.RootKind, core.FormatJSONSequence); err != nil {
+			return ValidationSummary{}, err
 		}
 		records++
 	}
@@ -128,10 +135,24 @@ func setRecordIndex(err *core.AppError, index int64) {
 	err.Location.RecordIndex = core.Int64(index)
 }
 
-func asAppError(err error) *core.AppError {
-	var appErr *core.AppError
-	if errors.As(err, &appErr) {
+func SourceError(err error, maxScanTime time.Duration) *core.AppError {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return core.ContextError(err, maxScanTime)
+	}
+	if appErr, ok := errors.AsType[*core.AppError](err); ok {
 		return appErr
 	}
-	return &core.AppError{Code: core.CodeIO, Message: err.Error()}
+	return &core.AppError{Code: core.CodeIO, Message: "cannot read framed source", Cause: err}
+}
+
+// CheckRecordTerminator implements RFC 7464's truncation check for numbers.
+func CheckRecordTerminator(record *RecordReader, kind RootKind, format core.Format) *core.AppError {
+	if format == core.FormatJSONSequence && kind == RootNumber && !record.EndsWithJSONWhitespace() {
+		return &core.AppError{
+			Code: core.CodeSyntax, Message: "a top-level number in a JSON sequence must be followed by JSON whitespace",
+			Location: &core.Location{ByteOffset: core.Int64(record.BytesRead()), RecordIndex: core.Int64(record.Index())},
+			Hint:     "Terminate the number with LF.", Cause: io.ErrUnexpectedEOF,
+		}
+	}
+	return nil
 }
