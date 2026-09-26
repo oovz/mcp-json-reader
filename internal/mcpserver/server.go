@@ -10,8 +10,8 @@ import (
 	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
-	"github.com/oovz/mcp-json-reader/v2/internal/core"
-	"github.com/oovz/mcp-json-reader/v2/internal/service"
+	"github.com/oovz/mcp-json-reader/v3/internal/core"
+	"github.com/oovz/mcp-json-reader/v3/internal/service"
 )
 
 var Version = ""

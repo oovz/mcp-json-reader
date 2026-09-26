@@ -20,10 +20,10 @@ MCP JSON Reader streams tokens from disk instead of unmarshaling the whole file.
 
 ## Install
 
-Requires Go 1.26.5 or later.
+Requires Go 1.27.1 or later.
 
 ```bash
-go install github.com/oovz/mcp-json-reader/v2/cmd/mcp-json-reader@v2.0.2
+go install github.com/oovz/mcp-json-reader/v3/cmd/mcp-json-reader@latest
 ```
 
 From an untagged checkout:
@@ -218,7 +218,7 @@ Tool failures use `isError: true`. The same machine-readable object appears in `
 
 ### Prerequisites
 
-- Go 1.26.5 or later (`go version`)
+- Go 1.27.1 or later (`go version`)
 - A C compiler (GCC, Clang, or MSVC) is required only for the race detector (`go test -race`)
 
 ### Get the source

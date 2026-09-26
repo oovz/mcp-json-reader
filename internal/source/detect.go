@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/oovz/mcp-json-reader/v2/internal/core"
+	"github.com/oovz/mcp-json-reader/v3/internal/core"
 )
 
 type Detection struct {

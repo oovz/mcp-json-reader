@@ -9,9 +9,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/oovz/mcp-json-reader/v2/internal/core"
-	"github.com/oovz/mcp-json-reader/v2/internal/query"
-	"github.com/oovz/mcp-json-reader/v2/internal/stream"
+	"github.com/oovz/mcp-json-reader/v3/internal/core"
+	"github.com/oovz/mcp-json-reader/v3/internal/query"
+	"github.com/oovz/mcp-json-reader/v3/internal/stream"
 )
 
 type Item struct {

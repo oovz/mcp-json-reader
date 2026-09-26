@@ -3,7 +3,7 @@ package query
 import (
 	"sort"
 
-	"github.com/oovz/mcp-json-reader/v2/internal/core"
+	"github.com/oovz/mcp-json-reader/v3/internal/core"
 )
 
 type DOMMatch struct {

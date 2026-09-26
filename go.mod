@@ -1,6 +1,6 @@
-module github.com/oovz/mcp-json-reader/v2
+module github.com/oovz/mcp-json-reader/v3
 
-go 1.26.5
+go 1.27.1
 
 require github.com/modelcontextprotocol/go-sdk v1.6.0
 

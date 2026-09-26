@@ -6,7 +6,7 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/oovz/mcp-json-reader/v2/internal/app"
+	"github.com/oovz/mcp-json-reader/v3/internal/app"
 )
 
 func main() {

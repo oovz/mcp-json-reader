@@ -5,7 +5,7 @@ import (
 	"errors"
 	"io"
 
-	"github.com/oovz/mcp-json-reader/v2/internal/core"
+	"github.com/oovz/mcp-json-reader/v3/internal/core"
 )
 
 const recordBufferSize = 32 << 10
