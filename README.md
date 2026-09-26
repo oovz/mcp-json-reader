@@ -1,46 +1,56 @@
 # MCP JSON Reader
 
-A bounded-memory [Model Context Protocol](https://modelcontextprotocol.io/) server for querying large or complex local JSON files.
+A local stdio [Model Context Protocol](https://modelcontextprotocol.io/) server for querying JSON documents, JSON Lines, and JSON sequences. It reads incrementally and limits token size, nesting, filter candidates, result data, and concurrent scans.
 
-MCP JSON Reader streams tokens from disk instead of unmarshaling the whole file. It supports exact [JSON Pointer](https://datatracker.ietf.org/doc/html/rfc6901) paths, a documented forward-streaming [JSONPath](https://datatracker.ietf.org/doc/html/rfc9535) profile, reusable file handles, and bounded pagination over local stdio.
+Queries use exact [JSON Pointer](https://www.rfc-editor.org/rfc/rfc6901.html) paths or a restricted forward-streaming [JSONPath](https://www.rfc-editor.org/rfc/rfc9535.html) profile. The three tools are `json_open`, `json_read`, and `json_close`.
 
-> [!IMPORTANT]
-> Version 2 is a breaking Go rewrite. The former npm package, JSON5 support, `query`/`filter` tools, and proprietary query operations are gone.
-
-## Features
-
-- Streams JSON, JSONL, and JSON-seq files of any size with fixed memory caps
-- Exact JSON Pointer and forward-streaming JSONPath queries
-- Reusable process-scoped file handles with cursor pagination
-- `os.Root` path confinement; no network transport or URL input
-- Structured, machine-readable tool errors
-
-> [!NOTE]
-> JSONC and JSON5 support is planned for a future release. Compressed input, SQL, jq, and network URLs are out of scope.
+Version 3 requires an MCP 2026-07-28 client that reads structured tool results.
 
 ## Install
 
-Requires Go 1.27.1 or later.
+With Go **1.27.1 or later**:
 
-```bash
+```sh
 go install github.com/oovz/mcp-json-reader/v3/cmd/mcp-json-reader@latest
-```
-
-From an untagged checkout:
-
-```bash
-CGO_ENABLED=0 go build -trimpath -o bin/mcp-json-reader ./cmd/mcp-json-reader
-```
-
-Pick a root directory. Every requested file must stay inside it, including after symlink resolution.
-
-```bash
 mcp-json-reader --root /workspace/data
 ```
 
-`MCP_JSON_ROOT` works in place of `--root`. On Windows, use absolute paths for both the executable and the root when the client does not inherit your `PATH`.
+Go installs the executable in `GOBIN`, or `$(go env GOPATH)/bin` by default.
+Add that directory to your `PATH`.
 
-Register the server with an MCP client:
+With Node.js **22.14.0 or later** and npm **11.5.1 or later**:
+
+```sh
+npx --yes @oovz/mcp-json-reader@3 --root /workspace/data
+```
+
+For a persistent npm installation:
+
+```sh
+npm install --global @oovz/mcp-json-reader
+mcp-json-reader --root /workspace/data
+```
+
+The server is written in Go. The npm package includes Go binaries for Linux,
+macOS, and Windows on amd64 and arm64. Its small JavaScript launcher selects
+the binary and forwards standard streams, arguments, signals, and exit status.
+Go installations run the executable directly.
+
+## Build and run
+
+Build this checkout with Go 1.27.1:
+
+```sh
+go build -trimpath -o bin/mcp-json-reader ./cmd/mcp-json-reader
+./bin/mcp-json-reader --root /workspace/data
+```
+
+On Windows, build an `.exe` and use absolute executable and root paths.
+Builds can use `CGO_ENABLED=0`. See [SUPPORT.md](SUPPORT.md) for supported platforms.
+
+Every requested source must resolve beneath the configured root. `MCP_JSON_ROOT` supplies the root when `--root` is omitted. Keep source files immutable while their handles are open. Use a dedicated, trusted data directory containing regular files; see [SECURITY.md](SECURITY.md).
+
+Example client configuration:
 
 ```json
 {
@@ -53,231 +63,147 @@ Register the server with an MCP client:
 }
 ```
 
-<details>
-<summary><strong>For AI agents</strong></summary>
-
-This server lets a coding agent read local JSON, JSONL, and JSON-seq files without loading them into memory. Hand it a root directory and call three tools: `json_open`, `json_read`, `json_close`.
-
-Open a file and get a handle:
-
-```json
-{ "path": "orders.jsonl", "format": "auto", "validation": "probe" }
-```
-
-Read by handle…
-
-```json
-{ "file_id": "jf_...", "language": "pointer", "query": "/orders/0/id" }
-```
-
-…or open a path implicitly and query in one call:
-
-```json
-{ "path": "orders.jsonl", "format": "jsonl", "language": "jsonpath", "query": "$[*].id", "max_items": 100 }
-```
-
-Page through large results by passing the cursor returned in the previous response:
-
-```json
-{ "cursor": "jc_..." }
-```
-
-Close the handle when done (close is idempotent):
-
-```json
-{ "file_id": "jf_..." }
-```
-
-See the reference below for tool schemas, formats, limits, and error codes.
-
-</details>
+The server supports MCP **2026-07-28** over stdio. It validates required request metadata before SDK dispatch. Clients use `server/discover` and read tool data from `structuredContent`; `content` is an empty array. Source handles and cursors belong to the server process and expire according to their idle limits.
 
 ## Tools
 
 ### `json_open`
 
-Open and inspect a file without materializing it. Returns a process-scoped handle plus the fixed format, validation coverage, and source metadata.
+Open a reusable handle and inspect a file:
 
 ```json
-{ "path": "orders.jsonl", "format": "auto", "validation": "probe" }
+{"path":"orders.jsonl","format":"jsonl","validation":"probe"}
 ```
 
-`validation` has two modes: `probe` examines a bounded prefix (large files return `complete: false` and can still fail later), `full` streams and validates the complete file without materializing it. Explicit formats are authoritative—a file opened as `json` is never silently reinterpreted as JSONL.
+The response reports `file_id`, requested/detected format, validation coverage, and source size/modification time. `probe` examines a bounded prefix. For JSONL and JSON-seq, both the byte and record caps apply, including to small files. `validation.complete: false` means later bytes remain unvalidated. `full` streams the complete source. An explicit format is authoritative.
 
 ### `json_read`
 
-Read from a handle, or open a path implicitly and query in one call. Matches contain an RFC 6901 path and a JSON value:
+After opening `orders.jsonl`, use its returned `file_id` to read the first
+record's `id` with JSON Pointer:
+
+```json
+{"file_id":"jf_...","language":"pointer","query":"/0/id"}
+```
+
+Or open a path for one query:
+
+```json
+{"path":"orders.jsonl","format":"jsonl","language":"jsonpath","query":"$[*].id","max_items":2}
+```
+
+Each returned item contains an RFC 6901 path and a JSON value:
 
 ```json
 {
-  "file_id": "jf_...",
-  "language": "jsonpath",
-  "query": "$[*].id",
-  "items": [
-    {"path": "/0/id", "value": 101},
-    {"path": "/1/id", "value": 102}
-  ],
-  "complete": false,
-  "next_cursor": "jc_...",
-  "stats": {"returned": 2, "skipped": 0}
+  "file_id":"jf_...",
+  "language":"jsonpath",
+  "query":"$[*].id",
+  "items":[{"path":"/0/id","value":101},{"path":"/1/id","value":102}],
+  "complete":false,
+  "next_cursor":"jc_...",
+  "stats":{"returned":2,"skipped":0}
 }
 ```
 
-Continue with the opaque cursor by itself: `{"cursor": "jc_..."}`. Cursors are single-use, process-scoped, bound to the source fingerprint and original query, and expire after inactivity. Each continuation rescans from the beginning and skips previously returned matches, keeping cursor state small at the cost of repeated I/O.
+Continue using the cursor alone:
 
-Pagination is driven by `max_items`. `max_result_bytes` is a hard limit on the complete serialized response; it does not split a value or create a page automatically. If the envelope exceeds the limit, lower `max_items` or raise the server cap.
+```json
+{"cursor":"jc_..."}
+```
 
-An implicit read closes its hidden file handle when the result is complete. While paginated, the response includes a `file_id` only for cleanup via `json_close`; continue with `next_cursor`, not by starting another read from that `file_id`.
+Cursors are opaque and single-use after a successful continuation. Caller cancellation and busy-handle rejection preserve a cursor; other failures can invalidate it. They bind the source handle, compiled query, limits, and number of consumed matches. Continuation rescans the source prefix and skips consumed matches. Cursor state stays small at the cost of repeated reads; [performance measurements](docs/performance.md) show the page-position cost.
 
-Pointers accept plain (`/orders/0/id`) and URI-fragment (`#/orders/0/id`) forms. Use `~1` for `/` and `~0` for `~` inside a member name. See the [JSONPath profile](docs/jsonpath-profile.md) for supported selectors, filter semantics, and deliberate limits.
+`max_items` determines page boundaries. `max_result_bytes` is a hard cap on the UTF-8 JSON encoding of the complete **`structuredContent` object**: values, escaped paths, query, cursor, handle, statistics, and application envelope. SDK-added protocol metadata, the outer JSON-RPC envelope, and error diagnostics are outside this application-data cap. The server checks sizes incrementally before allocating retained paths or encoded values. Budget exhaustion returns an error and discards the partial page. Use a smaller page or a narrower query to reduce result size.
+
+The size preflight conservatively reserves continuation metadata. Very small budgets can be rejected before the server knows that a page is terminal. Omit the parameter to use the server default.
+
+An implicit path read closes its handle when complete. During pagination its `file_id` is exposed for cleanup; continue using `next_cursor`. An explicit handle can serve independent queries. A handle already leased by a scan returns `RESOURCE_LIMIT_EXCEEDED` with `limit.name: "source_busy"` immediately.
+
+Pointers accept plain `/orders/0/id` and URI-fragment `#/orders/0/id` forms. The empty string selects the root; `~1` escapes `/` and `~0` escapes `~`. The [JSONPath profile](docs/jsonpath-profile.md) defines supported selectors and comparisons.
 
 ### `json_close`
 
 ```json
-{ "file_id": "jf_..." }
+{"file_id":"jf_..."}
 ```
 
-Returns `{"file_id":"jf_...","closed":true}`. Repeating it returns the same `file_id` with `closed: false`. Cancellation stops waiting for `json_close`, but a close that has started is not rolled back: the handle remains unavailable and cleanup finishes after any active read releases its lease.
+Returns `{"file_id":"jf_...","closed":true}`. Repeating the operation returns `closed:false`. Closing invalidates associated cursors before waiting for an active lease. A cancelled caller stops waiting; cleanup finishes after the active read releases its lease.
 
-## Formats
+## Formats and validation
 
-| Value | Meaning |
+| Format | Contract |
 | --- | --- |
-| `auto` | Detect from a bounded sample and extension. Never guesses JSONC or JSON5. |
-| `json` | Exactly one standard JSON value. Any JSON root type is valid. |
-| `jsonl` | Every physical LF/CRLF-delimited record must contain exactly one standard JSON value. Interior blank lines are invalid; final LF is optional. Records form a virtual array. |
-| `json-seq` | Zero or more values prefixed by ASCII RS `0x1E`. Consecutive separators create an invalid empty record. A top-level number must be followed by JSON whitespace. Records form a virtual array; the empty byte stream is valid. |
+| `auto` | Detect from a bounded sample and extension. |
+| `json` | Exactly one standard JSON value; every JSON root type is supported. |
+| `jsonl` | Each physical LF/CRLF-delimited record contains one value. Interior blank lines are invalid. Final LF is optional. Records form a virtual array. |
+| `json-seq` | RFC 7464 record-separator framing. A run of RS bytes introduces the next record. A top-level number requires trailing JSON whitespace. Records form a virtual array. An empty stream or an RS-only stream contains zero records. |
 
-Auto-detection rules: an RS at byte zero identifies `json-seq`; `.jsonl` and `.ndjson` identify `jsonl`; multiple independently valid line-aligned values identify `jsonl`; ambiguous one-line values and unknown extensions default to `json`. Once selected, a handle's format never changes.
+Auto-detection chooses JSON-seq for RS at byte zero, JSONL for `.jsonl`/`.ndjson`, and JSONL for multiple independently valid line-aligned values. Ambiguous single values default to JSON. A selected format is fixed for the handle.
 
-<details>
-<summary><strong>Resource limits</strong></summary>
+The input policy requires valid UTF-8, well-formed escaped surrogate pairs, and unique object member names. JSON comments, JSON5, compressed input, URLs, SQL, and jq are outside the supported contract. A malformed record fails the operation.
 
-Defaults can be changed with CLI flags. Per-read `max_items` and `max_result_bytes` may only lower server caps.
+`complete:false` covers only the scanned prefix and lookahead. A successful terminal page completes the scan and its validation. Identity, size, and modification time are checked at open, before each read, and after execution while the source lease is held. These checks detect ordinary source changes; immutable input remains required for consistent results.
+
+## Resource limits
+
+Per-read `max_items` and `max_result_bytes` can lower server caps. CLI flags configure the server limits.
 
 | Limit | Default |
 | --- | ---: |
-| Path bytes | 32 KiB |
-| Query bytes | 16 KiB |
+| Source path / query bytes | 32 KiB / 16 KiB |
 | Encoded bytes inside one string token | 1 MiB |
-| Number bytes | 1 KiB |
-| Nesting depth | 256 |
-| Members per object | 100,000 |
-| Retained key bytes per object | 8 MiB |
-| Retained key bytes across active nested objects | 32 MiB |
-| Record bytes | 64 MiB |
-| Candidate bytes | 8 MiB |
-| Serialized read result | 4 MiB |
+| Number-token bytes | 1 KiB |
+| Container depth | 256 |
+| Members in one object | 100,000 |
+| Decoded key bytes per object / active nested objects | 8 MiB / 32 MiB |
+| JSONL or JSON-seq record bytes | 64 MiB |
+| Matched/filter candidate bytes | 8 MiB |
+| Serialized structured read data | 4 MiB |
 | Items per page | 1,000 |
-| Scan time | 30 seconds |
-| Probe prefix | 4 MiB / 32 records |
-| Open handles | 32 |
-| Stored cursors | 128 |
-| Concurrent scans | 4 |
-| Handle / cursor idle TTL | 15 minutes / 5 minutes |
+| Request deadline, including scan admission | 30 seconds |
+| Probe bytes / complete records | 4 MiB / 32 |
+| Open handles / cursors / concurrent scans | 32 / 128 / 4 |
+| Handle / cursor idle lifetime | 15 minutes / 5 minutes |
+| MCP stdio frame | 16 MiB |
 
-Run `mcp-json-reader -help` for the corresponding flags.
+Run `mcp-json-reader --help` for flag names. Process memory also includes parser
+bookkeeping, buffers, Go objects and concurrent scans. Use OS process limits
+for a hard memory ceiling. Deadline checks are cooperative around parsing and
+reads; an unresponsive filesystem call can exceed the deadline.
 
-</details>
+The 16 MiB stdio frame cap is applied before a request reaches the MCP tool
+handlers. Each frame must contain one complete JSON object on one physical
+line. The cap includes whitespace and the line delimiter. The frame buffer and
+SDK decoder allocations add to process memory.
 
-<details>
-<summary><strong>Errors</strong></summary>
+Missing or malformed required protocol metadata returns JSON-RPC `-32602`.
+An unsupported protocol version returns `-32022`. Clients can correct the
+request and continue using the same connection.
 
-Tool failures use `isError: true`. The same machine-readable object appears in `structuredContent` and as JSON text for older clients.
+## Errors
+
+Application failures have `isError:true` and a structured error object:
 
 ```json
-{
-  "code": "FORMAT_MISMATCH",
-  "message": "expected one JSON document, but found another top-level value",
-  "expected_format": "json",
-  "likely_formats": ["jsonl"],
-  "retry": {"format": "jsonl"}
-}
+{"code":"RESOURCE_LIMIT_EXCEEDED","message":"max_result_bytes exceeded","limit":{"name":"max_result_bytes","limit":1024}}
 ```
 
 | Code | Meaning |
 | --- | --- |
-| `UNSUPPORTED_FORMAT` | The requested format name is not supported. |
-| `FORMAT_MISMATCH` | The selected framing does not match the observed source. |
-| `SYNTAX_ERROR` | A standard JSON value or frame is malformed. |
-| `UNSUPPORTED_SYNTAX` | A recognized non-standard construct, currently JSON comments, was found. |
-| `QUERY_SYNTAX_ERROR` | A Pointer or JSONPath expression is malformed. |
-| `UNSUPPORTED_QUERY_FEATURE` | A Pointer or JSONPath feature is outside this server's profile. |
-| `RESOURCE_LIMIT_EXCEEDED` | A configured parser, result, time, handle, cursor, or concurrency limit was reached. |
-| `SOURCE_CHANGED` | File identity, size, or modification time changed after open. |
-| `HANDLE_EXPIRED` | A handle or cursor is closed, expired, consumed, or otherwise unavailable. |
-| `INVALID_ARGUMENT` | Tool fields are missing, conflicting, empty, or outside their allowed range. |
-| `ACCESS_DENIED` | The requested path is outside the configured root or escapes through a link. |
-| `IO_ERROR` | The source or configured root could not be read. |
-| `CANCELLED` | The client cancelled the operation. |
-| `INTERNAL_ERROR` | The server could not complete an internal operation. |
+| `UNSUPPORTED_FORMAT` | Unsupported format in a direct service call. MCP schema violations use `INVALID_ARGUMENT`. |
+| `FORMAT_MISMATCH` | Source framing differs from the selected format. |
+| `SYNTAX_ERROR` | Malformed JSON, Unicode, duplicate names, or record framing. |
+| `UNSUPPORTED_SYNTAX` | Recognized nonstandard JSON construct. |
+| `QUERY_SYNTAX_ERROR` | Malformed query or an integer outside the interoperable domain. |
+| `UNSUPPORTED_QUERY_FEATURE` | Query construct outside the documented profile. |
+| `RESOURCE_LIMIT_EXCEEDED` | Parser, result, deadline, admission, handle, or cursor limit. |
+| `SOURCE_CHANGED` | Source identity or fingerprint changed. |
+| `HANDLE_EXPIRED` | Closed, consumed, expired, or unavailable handle/cursor. |
+| `INVALID_ARGUMENT` | Arguments fail the declared closed schema or service contract. |
+| `ACCESS_DENIED` | Confined file access was denied. |
+| `IO_ERROR` | Source I/O failed. |
+| `CANCELLED` | Caller cancellation was observed. |
+| `INTERNAL_ERROR` | Internal operation failed. |
 
-</details>
-
-## Development
-
-### Prerequisites
-
-- Go 1.27.1 or later (`go version`)
-- A C compiler (GCC, Clang, or MSVC) is required only for the race detector (`go test -race`)
-
-### Get the source
-
-```bash
-git clone https://github.com/oovz/mcp-json-reader.git
-cd mcp-json-reader
-go mod download
-```
-
-### Build
-
-```bash
-go build -trimpath ./cmd/mcp-json-reader
-# or a static binary with no CGO runtime requirement:
-CGO_ENABLED=0 go build -trimpath -o bin/mcp-json-reader ./cmd/mcp-json-reader
-```
-
-### Run locally
-
-```bash
-./bin/mcp-json-reader --root ./tests
-```
-
-The server speaks MCP over stdio. Point any MCP client at the built binary with `--root` set to a directory of JSON files. The `tests/` folder ships fixtures (`mock.json`, `mock-large.json`, `mock-edge-cases.json`) you can query immediately.
-
-### Test
-
-```bash
-# formatting and vet
-gofmt -l cmd internal
-go vet ./...
-
-# full unit and integration suite
-go test ./...
-# run cases in a random order to catch order-dependent state
-go test -shuffle=on ./...
-# race detector (requires CGO and a C compiler)
-go test -race ./...
-```
-
-### Fuzz
-
-Seeded fuzz targets cover Pointer and JSONPath compilation, strict document validation, and both record framers. The normal test suite runs their seed corpus; you can also run each target for a bounded interval:
-
-```bash
-go test ./internal/query -run=^$ -fuzz=FuzzCompileQueries -fuzztime=10s
-go test ./internal/stream -run=^$ -fuzz=FuzzValidateDocument -fuzztime=10s
-go test ./internal/stream -run=^$ -fuzz=FuzzRecordFramers -fuzztime=10s
-```
-
-### What CI runs
-
-CI runs on Ubuntu, Windows, and macOS with Go 1.26.x. The checks are `go mod verify`, `go mod tidy -diff`, `gofmt -l`, `go vet`, `go test ./... -count=1`, `go build -trimpath ./cmd/mcp-json-reader`, plus a separate race-detector job (`go test -race ./... -count=1`). Run the same commands locally before pushing.
-
-## Standards
-
-- MCP transport and tools: [MCP 2025-11-25](https://modelcontextprotocol.io/specification/2025-11-25); the pinned Go SDK also negotiates `2025-06-18`, `2025-03-26`, and `2024-11-05`
-- Standard JSON: [RFC 8259](https://datatracker.ietf.org/doc/html/rfc8259), with invalid UTF-8 and duplicate names rejected
-- JSON Pointer: [RFC 6901](https://datatracker.ietf.org/doc/html/rfc6901)
-- JSONPath: [RFC 9535](https://datatracker.ietf.org/doc/html/rfc9535), documented streaming profile
-- JSON text sequences: [RFC 7464](https://datatracker.ietf.org/doc/html/rfc7464)
+Message, hint, and diagnostic path text are bounded individually to 1,024 UTF-8 bytes at the MCP boundary. Input property names are case-sensitive. Duplicate argument properties are rejected before decoding can collapse them.
