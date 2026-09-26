@@ -108,6 +108,11 @@ func NewManager(rootPath string, limits core.Limits, options ManagerOptions) (*M
 }
 
 func (manager *Manager) Open(ctx context.Context, options OpenOptions) (OpenInfo, *core.AppError) {
+	ctx, cancel := context.WithTimeout(ctx, manager.limits.MaxScanTime)
+	defer cancel()
+	if err := ctx.Err(); err != nil {
+		return OpenInfo{}, core.ContextError(err, manager.limits.MaxScanTime)
+	}
 	requestedFormat := options.Format
 	if requestedFormat == "" {
 		requestedFormat = core.FormatAuto
@@ -133,15 +138,19 @@ func (manager *Manager) Open(ctx context.Context, options OpenOptions) (OpenInfo
 		manager.mu.Unlock()
 		return OpenInfo{}, &core.AppError{Code: core.CodeInternal, Message: "source manager is closed"}
 	}
-	if len(manager.handles) >= manager.limits.MaxOpenFiles {
+	if count := len(manager.handles); count >= manager.limits.MaxOpenFiles {
 		manager.mu.Unlock()
-		return OpenInfo{}, &core.AppError{Code: core.CodeResourceLimit, Message: "max_open_files exceeded", Limit: &core.LimitDetail{Name: "max_open_files", Limit: int64(manager.limits.MaxOpenFiles), Value: int64(len(manager.handles) + 1)}}
+		return OpenInfo{}, &core.AppError{Code: core.CodeResourceLimit, Message: "max_open_files exceeded", Limit: &core.LimitDetail{Name: "max_open_files", Limit: int64(manager.limits.MaxOpenFiles), Value: int64(count + 1)}}
 	}
 	manager.mu.Unlock()
 
-	file, openErr := manager.root.Open(relPath)
+	file, openErr := openConfined(manager.root, relPath)
 	if openErr != nil {
 		return OpenInfo{}, manager.openError(openErr)
+	}
+	if err := ctx.Err(); err != nil {
+		_ = file.Close()
+		return OpenInfo{}, core.ContextError(err, manager.limits.MaxScanTime)
 	}
 	keepFile := false
 	defer func() {
@@ -180,6 +189,9 @@ func (manager *Manager) Open(ctx context.Context, options OpenOptions) (OpenInfo
 	if finalStatErr != nil || pathStatErr != nil || !os.SameFile(info, pathInfo) || fingerprintOf(finalInfo) != fingerprintOf(info) || fingerprintOf(pathInfo) != fingerprintOf(info) {
 		return OpenInfo{}, &core.AppError{Code: core.CodeSourceChanged, Message: "source changed while it was being opened"}
 	}
+	if err := ctx.Err(); err != nil {
+		return OpenInfo{}, core.ContextError(err, manager.limits.MaxScanTime)
+	}
 	id, idErr := newID("jf_")
 	if idErr != nil {
 		return OpenInfo{}, &core.AppError{Code: core.CodeInternal, Message: "cannot allocate a file handle"}
@@ -213,6 +225,28 @@ func (manager *Manager) Open(ctx context.Context, options OpenOptions) (OpenInfo
 }
 
 func (manager *Manager) validateOpen(ctx context.Context, file *os.File, size int64, prefix []byte, format core.Format, mode core.ValidationMode) (ValidationInfo, *core.AppError) {
+	if mode == core.ValidationProbe && size <= manager.limits.ProbeBytes && format != core.FormatJSON {
+		end, records := 0, 0
+		switch format {
+		case core.FormatJSONL:
+			end, records = completeJSONLLines(prefix, manager.limits.ProbeRecords)
+		case core.FormatJSONSequence:
+			end, records = completeJSONSequenceRecords(prefix, manager.limits.ProbeRecords)
+			// Separator runs contain no records. Include a trailing run in a
+			// complete probe, without consuming any later record.
+			if records == manager.limits.ProbeRecords && len(bytes.Trim(prefix[end:], "\x1e")) == 0 {
+				end = len(prefix)
+			}
+		}
+		if records < manager.limits.ProbeRecords {
+			end = len(prefix)
+		}
+		summary, err := stream.ValidateSource(ctx, bytes.NewReader(prefix[:end]), format, manager.limits)
+		if err != nil {
+			return ValidationInfo{}, err
+		}
+		return ValidationInfo{Mode: mode, Complete: int64(end) == size, BytesExamined: int64(end), RecordsExamined: summary.Records}, nil
+	}
 	if mode == core.ValidationFull || size <= manager.limits.ProbeBytes {
 		if _, err := file.Seek(0, io.SeekStart); err != nil {
 			return ValidationInfo{}, &core.AppError{Code: core.CodeIO, Message: "cannot seek requested source"}
@@ -238,7 +272,7 @@ func validateLargeProbe(ctx context.Context, prefix []byte, format core.Format, 
 		if len(prefix) > 0 && prefix[0] == 0x1e {
 			return 0, 0, &core.AppError{Code: core.CodeFormatMismatch, Message: "expected one JSON document, but found a JSON sequence record separator", ExpectedFormat: core.FormatJSON, LikelyFormats: []core.Format{core.FormatJSONSequence}, Retry: &core.Retry{Format: core.FormatJSONSequence}, Location: &core.Location{ByteOffset: core.Int64(0)}}
 		}
-		if _, err := stream.ValidateSource(ctx, bytes.NewReader(probe), format, limits); err != nil && !incompleteProbeError(err, format) {
+		if _, err := stream.ValidateSource(ctx, bytes.NewReader(probe), format, limits); err != nil && !incompleteProbeError(err) {
 			return 0, int64(len(probe)), err
 		}
 		return 0, int64(len(probe)), nil
@@ -249,7 +283,7 @@ func validateLargeProbe(ctx context.Context, prefix []byte, format core.Format, 
 			validationEnd = end
 		}
 		trailingRecordIncomplete := validationEnd == len(probe) && end < validationEnd
-		if _, err := stream.ValidateSource(ctx, bytes.NewReader(probe[:validationEnd]), format, limits); err != nil && !incompleteFramedProbeError(err, format, int64(records), trailingRecordIncomplete) {
+		if _, err := stream.ValidateSource(ctx, bytes.NewReader(probe[:validationEnd]), format, limits); err != nil && !incompleteFramedProbeError(err, int64(records), trailingRecordIncomplete) {
 			return 0, int64(validationEnd), err
 		}
 		return int64(records), int64(validationEnd), nil
@@ -263,7 +297,7 @@ func validateLargeProbe(ctx context.Context, prefix []byte, format core.Format, 
 			validationEnd = end
 		}
 		trailingRecordIncomplete := validationEnd == len(probe) && end < validationEnd
-		if _, err := stream.ValidateSource(ctx, bytes.NewReader(probe[:validationEnd]), format, limits); err != nil && !incompleteFramedProbeError(err, format, int64(records), trailingRecordIncomplete) {
+		if _, err := stream.ValidateSource(ctx, bytes.NewReader(probe[:validationEnd]), format, limits); err != nil && !incompleteFramedProbeError(err, int64(records), trailingRecordIncomplete) {
 			return 0, int64(validationEnd), err
 		}
 		return int64(records), int64(validationEnd), nil
@@ -341,18 +375,15 @@ func incompleteUTF8Prefix(suffix []byte) bool {
 	return true
 }
 
-func incompleteProbeError(err *core.AppError, format core.Format) bool {
+func incompleteProbeError(err *core.AppError) bool {
 	if err == nil || err.Code != core.CodeSyntax {
 		return false
 	}
-	if err.Message == "unexpected end of JSON input" {
-		return true
-	}
-	return format == core.FormatJSONSequence && err.Message == "a top-level number in a JSON sequence must be followed by JSON whitespace"
+	return errors.Is(err, io.ErrUnexpectedEOF)
 }
 
-func incompleteFramedProbeError(err *core.AppError, format core.Format, completeRecords int64, trailingRecordIncomplete bool) bool {
-	if !trailingRecordIncomplete || !incompleteProbeError(err, format) || err.Location == nil || err.Location.RecordIndex == nil {
+func incompleteFramedProbeError(err *core.AppError, completeRecords int64, trailingRecordIncomplete bool) bool {
+	if !trailingRecordIncomplete || !incompleteProbeError(err) || err.Location == nil || err.Location.RecordIndex == nil {
 		return false
 	}
 	return *err.Location.RecordIndex == completeRecords
@@ -373,15 +404,21 @@ func completeJSONLLines(prefix []byte, maximum int) (int, int) {
 }
 
 func completeJSONSequenceRecords(prefix []byte, maximum int) (int, int) {
-	end, records, offset := 0, 0, 1
-	for records < maximum {
-		next := bytes.IndexByte(prefix[offset:], 0x1e)
-		if next < 0 {
-			break
+	end, records := 0, 0
+	inRecord := false
+	for offset, value := range prefix {
+		if value == 0x1e {
+			if inRecord {
+				records++
+				inRecord = false
+				end = offset
+				if records == maximum {
+					return end, records
+				}
+			}
+		} else {
+			inRecord = true
 		}
-		end = offset + next
-		offset = end + 1
-		records++
 	}
 	return end, records
 }
@@ -421,11 +458,12 @@ func (manager *Manager) relativePath(requested string) (string, *core.AppError) 
 }
 
 func (manager *Manager) openError(err error) *core.AppError {
-	message := strings.ToLower(err.Error())
-	if errors.Is(err, os.ErrPermission) || strings.Contains(message, "escape") || strings.Contains(message, "outside") || strings.Contains(message, "symlink") {
-		return &core.AppError{Code: core.CodeAccessDenied, Message: "requested path cannot be opened within the configured root"}
+	if errors.Is(err, os.ErrNotExist) || errors.Is(err, os.ErrClosed) {
+		return &core.AppError{Code: core.CodeIO, Message: "cannot open requested source", Cause: err}
 	}
-	return &core.AppError{Code: core.CodeIO, Message: "cannot open requested source"}
+	// os.Root does not export a path-escape sentinel. Treat an unsuccessful
+	// confined open as an access refusal rather than inspecting error text.
+	return &core.AppError{Code: core.CodeAccessDenied, Message: "requested path cannot be opened within the configured root", Cause: err}
 }
 
 type Lease struct {
@@ -434,7 +472,10 @@ type Lease struct {
 	released bool
 }
 
-func (manager *Manager) Acquire(id string) (*Lease, *core.AppError) {
+func (manager *Manager) Acquire(ctx context.Context, id string) (*Lease, *core.AppError) {
+	if err := ctx.Err(); err != nil {
+		return nil, core.ContextError(err, manager.limits.MaxScanTime)
+	}
 	manager.mu.Lock()
 	handle := manager.handles[id]
 	if handle == nil || manager.closed {
@@ -442,7 +483,15 @@ func (manager *Manager) Acquire(id string) (*Lease, *core.AppError) {
 		return nil, &core.AppError{Code: core.CodeHandleExpired, Message: "file handle is no longer available"}
 	}
 	manager.mu.Unlock()
-	handle.mu.Lock()
+	// A handle has one scan position. Reject competing use immediately; callers
+	// may submit another operation after the current lease is released.
+	if !handle.mu.TryLock() {
+		return nil, &core.AppError{Code: core.CodeResourceLimit, Message: "source is already in use", Limit: &core.LimitDetail{Name: "source_busy", Limit: 1, Value: 2}}
+	}
+	if err := ctx.Err(); err != nil {
+		handle.mu.Unlock()
+		return nil, core.ContextError(err, manager.limits.MaxScanTime)
+	}
 	if handle.closed || !manager.now().Before(handle.expires) {
 		handle.closed = true
 		_ = handle.file.Close()
@@ -454,30 +503,53 @@ func (manager *Manager) Acquire(id string) (*Lease, *core.AppError) {
 		manager.mu.Unlock()
 		return nil, &core.AppError{Code: core.CodeHandleExpired, Message: "file handle has expired"}
 	}
-	fileInfo, fileErr := handle.file.Stat()
-	pathInfo, pathErr := manager.root.Stat(handle.relPath)
-	if fileErr != nil || pathErr != nil || !os.SameFile(handle.original, pathInfo) || fingerprintOf(fileInfo) != handle.fingerprint || fingerprintOf(pathInfo) != handle.fingerprint {
-		handle.mu.Unlock()
-		return nil, &core.AppError{Code: core.CodeSourceChanged, Message: "source changed after it was opened"}
+	lease := &Lease{manager: manager, handle: handle}
+	if err := lease.Validate(); err != nil {
+		lease.Release()
+		return nil, err
 	}
 	if _, seekErr := handle.file.Seek(0, io.SeekStart); seekErr != nil {
 		handle.mu.Unlock()
 		return nil, &core.AppError{Code: core.CodeIO, Message: "cannot rewind source"}
 	}
 	handle.expires = manager.now().Add(manager.limits.HandleTTL)
-	return &Lease{manager: manager, handle: handle}, nil
+	return lease, nil
 }
 
 func (lease *Lease) File() *os.File      { return lease.handle.file }
 func (lease *Lease) Format() core.Format { return lease.handle.format }
-func (lease *Lease) FileID() string      { return lease.handle.id }
 func (lease *Lease) Ephemeral() bool     { return lease.handle.ephemeral }
+
+// Validate must run under the lease both before and after scanning. Detected
+// mutation invalidates the handle immediately, including for a final page.
+func (lease *Lease) Validate() *core.AppError {
+	if lease.released {
+		return &core.AppError{Code: core.CodeInternal, Message: "source lease has been released"}
+	}
+	handle := lease.handle
+	fileInfo, fileErr := handle.file.Stat()
+	pathInfo, pathErr := lease.manager.root.Stat(handle.relPath)
+	if fileErr == nil && pathErr == nil && !handle.closed && os.SameFile(handle.original, fileInfo) && os.SameFile(handle.original, pathInfo) && fingerprintOf(fileInfo) == handle.fingerprint && fingerprintOf(pathInfo) == handle.fingerprint {
+		return nil
+	}
+	handle.closed = true
+	_ = handle.file.Close()
+	lease.manager.mu.Lock()
+	if lease.manager.handles[handle.id] == handle {
+		delete(lease.manager.handles, handle.id)
+	}
+	lease.manager.mu.Unlock()
+	return &core.AppError{Code: core.CodeSourceChanged, Message: "source changed after it was opened"}
+}
 
 func (lease *Lease) Release() {
 	if lease == nil || lease.released {
 		return
 	}
 	lease.released = true
+	if !lease.handle.closed {
+		lease.handle.expires = lease.manager.now().Add(lease.manager.limits.HandleTTL)
+	}
 	lease.handle.mu.Unlock()
 }
 
@@ -522,7 +594,9 @@ func (manager *Manager) cleanupExpired() {
 	manager.mu.Unlock()
 	for _, candidate := range candidates {
 		handle := candidate.handle
-		handle.mu.Lock()
+		if !handle.mu.TryLock() {
+			continue
+		}
 		expired := !handle.closed && !manager.now().Before(handle.expires)
 		if expired {
 			handle.closed = true

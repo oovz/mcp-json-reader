@@ -4,7 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
-	"encoding/json"
+	"errors"
 	"sync"
 	"time"
 
@@ -65,8 +65,6 @@ type cursorState struct {
 	id             string
 	fileID         string
 	plan           *query.Plan
-	language       core.QueryLanguage
-	expression     string
 	skip           int64
 	maxItems       int
 	maxResultBytes int64
@@ -112,6 +110,11 @@ func New(sources *source.Manager, limits core.Limits, options Options) *Service 
 }
 
 func (service *Service) Open(ctx context.Context, input OpenInput) (OpenOutput, *core.AppError) {
+	ctx, cancel := context.WithTimeout(ctx, service.limits.MaxScanTime)
+	defer cancel()
+	if err := ctx.Err(); err != nil {
+		return OpenOutput{}, core.ContextError(err, service.limits.MaxScanTime)
+	}
 	if pathErr := service.textLimit("max_path_bytes", int64(len(input.Path)), service.limits.MaxPathBytes); pathErr != nil {
 		return OpenOutput{}, pathErr
 	}
@@ -128,6 +131,11 @@ func (service *Service) Open(ctx context.Context, input OpenInput) (OpenOutput, 
 }
 
 func (service *Service) Read(ctx context.Context, input ReadInput) (ReadOutput, *core.AppError) {
+	ctx, cancel := context.WithTimeout(ctx, service.limits.MaxScanTime)
+	defer cancel()
+	if err := ctx.Err(); err != nil {
+		return ReadOutput{}, core.ContextError(err, service.limits.MaxScanTime)
+	}
 	if input.Cursor != "" {
 		if input.FileID != "" || input.Path != "" || input.Format != "" || input.Language != "" || input.Query != "" || input.MaxItems != 0 || input.MaxResultBytes != 0 {
 			return ReadOutput{}, &core.AppError{Code: core.CodeInvalidArgument, Message: "cursor continuation cannot include source, query, or limit fields"}
@@ -181,15 +189,15 @@ func (service *Service) Read(ctx context.Context, input ReadInput) (ReadOutput, 
 	}
 	if operationErr := service.beginHandleOperation(fileID); operationErr != nil {
 		if ephemeral {
-			_, _ = service.closeManagedHandle(fileID)
+			_, _ = service.closeManagedHandleContext(ctx, fileID)
 		}
 		return ReadOutput{}, operationErr
 	}
 	defer service.endHandleOperation(fileID)
-	lease, leaseErr := service.sources.Acquire(fileID)
+	lease, leaseErr := service.sources.Acquire(ctx, fileID)
 	if leaseErr != nil {
-		if ephemeral {
-			_, _ = service.closeManagedHandle(fileID)
+		if ephemeral || leaseErr.Code == core.CodeSourceChanged {
+			_, _ = service.closeManagedHandleContext(ctx, fileID)
 		}
 		return ReadOutput{}, leaseErr
 	}
@@ -197,15 +205,25 @@ func (service *Service) Read(ctx context.Context, input ReadInput) (ReadOutput, 
 		lease.Release()
 		return ReadOutput{}, &core.AppError{Code: core.CodeInvalidArgument, Message: "an implicitly opened file_id can only be continued with its cursor or explicitly closed"}
 	}
-	page, executeErr := engine.Execute(ctx, lease.File(), lease.Format(), plan, service.limits, engine.PageOptions{MaxItems: input.MaxItems, MaxResultBytes: input.MaxResultBytes})
+	page, executeErr := engine.Execute(ctx, lease.File(), lease.Format(), plan, service.limits, engine.PageOptions{MaxItems: input.MaxItems, MaxResultBytes: input.MaxResultBytes, ReservedBytes: service.resultReserve(fileID, plan, 0, input.MaxItems)})
+	if executeErr == nil {
+		executeErr = lease.Validate()
+	}
+	if executeErr == nil && ctx.Err() != nil {
+		executeErr = core.ContextError(ctx.Err(), service.limits.MaxScanTime)
+	}
 	lease.Release()
 	if executeErr != nil {
-		if ephemeral {
-			_, _ = service.closeManagedHandle(fileID)
+		if ephemeral || executeErr.Code == core.CodeSourceChanged {
+			_, _ = service.closeManagedHandleContext(ctx, fileID)
 		}
 		return ReadOutput{}, executeErr
 	}
-	return service.finishPage(fileID, plan, page, 0, input.MaxItems, input.MaxResultBytes, ephemeral)
+	output, finishErr := service.finishPage(ctx, fileID, plan, page, 0, input.MaxItems, input.MaxResultBytes, ephemeral, nil)
+	if finishErr != nil && ephemeral {
+		_, _ = service.closeManagedHandleContext(ctx, fileID)
+	}
+	return output, finishErr
 }
 
 func (service *Service) continueCursor(ctx context.Context, cursorID string) (ReadOutput, *core.AppError) {
@@ -214,41 +232,55 @@ func (service *Service) continueCursor(ctx context.Context, cursorID string) (Re
 		return ReadOutput{}, scanErr
 	}
 	defer releaseScan()
-	state, cursorErr := service.lockCursor(cursorID)
+	state, cursorErr := service.lockCursor(ctx, cursorID)
 	if cursorErr != nil {
 		return ReadOutput{}, cursorErr
 	}
 	if operationErr := service.beginHandleOperation(state.fileID); operationErr != nil {
 		service.unlockCursor(state, false)
 		if state.ephemeral {
-			_, _ = service.closeManagedHandle(state.fileID)
+			_, _ = service.closeManagedHandleContext(ctx, state.fileID)
 		}
 		return ReadOutput{}, operationErr
 	}
 	defer service.endHandleOperation(state.fileID)
-	lease, leaseErr := service.sources.Acquire(state.fileID)
+	lease, leaseErr := service.sources.Acquire(ctx, state.fileID)
 	if leaseErr != nil {
-		service.unlockCursor(state, false)
-		if state.ephemeral {
-			_, _ = service.closeManagedHandle(state.fileID)
+		keep := leaseErr.Code == core.CodeCancelled || leaseErr.Limit != nil && leaseErr.Limit.Name == "source_busy"
+		service.unlockCursor(state, keep)
+		if !keep && (state.ephemeral || leaseErr.Code == core.CodeSourceChanged) {
+			_, _ = service.closeManagedHandleContext(ctx, state.fileID)
 		}
 		return ReadOutput{}, leaseErr
 	}
-	page, executeErr := engine.Execute(ctx, lease.File(), lease.Format(), state.plan, service.limits, engine.PageOptions{Skip: state.skip, MaxItems: state.maxItems, MaxResultBytes: state.maxResultBytes})
+	page, executeErr := engine.Execute(ctx, lease.File(), lease.Format(), state.plan, service.limits, engine.PageOptions{Skip: state.skip, MaxItems: state.maxItems, MaxResultBytes: state.maxResultBytes, ReservedBytes: service.resultReserve(state.fileID, state.plan, state.skip, state.maxItems)})
+	if executeErr == nil {
+		executeErr = lease.Validate()
+	}
+	if executeErr == nil && ctx.Err() != nil {
+		executeErr = core.ContextError(ctx.Err(), service.limits.MaxScanTime)
+	}
 	lease.Release()
 	if executeErr != nil {
 		keep := executeErr.Code == core.CodeCancelled
 		service.unlockCursor(state, keep)
-		if !keep && state.ephemeral {
-			_, _ = service.closeManagedHandle(state.fileID)
+		if !keep && (state.ephemeral || executeErr.Code == core.CodeSourceChanged) {
+			_, _ = service.closeManagedHandleContext(ctx, state.fileID)
 		}
 		return ReadOutput{}, executeErr
 	}
-	service.unlockCursor(state, false)
-	return service.finishPage(state.fileID, state.plan, page, state.skip, state.maxItems, state.maxResultBytes, state.ephemeral)
+	output, finishErr := service.finishPage(ctx, state.fileID, state.plan, page, state.skip, state.maxItems, state.maxResultBytes, state.ephemeral, state)
+	if finishErr != nil {
+		keep := finishErr.Code == core.CodeCancelled
+		service.unlockCursor(state, keep)
+		if !keep && state.ephemeral {
+			_, _ = service.closeManagedHandleContext(ctx, state.fileID)
+		}
+	}
+	return output, finishErr
 }
 
-func (service *Service) finishPage(fileID string, plan *query.Plan, page engine.Page, skip int64, maxItems int, maxResultBytes int64, ephemeral bool) (ReadOutput, *core.AppError) {
+func (service *Service) finishPage(ctx context.Context, fileID string, plan *query.Plan, page engine.Page, skip int64, maxItems int, maxResultBytes int64, ephemeral bool, previous *cursorState) (ReadOutput, *core.AppError) {
 	items := page.Items
 	if items == nil {
 		items = []engine.Item{}
@@ -261,47 +293,38 @@ func (service *Service) finishPage(fileID string, plan *query.Plan, page engine.
 		Complete: !page.More,
 		Stats:    ReadStats{Returned: len(page.Items), Skipped: skip},
 	}
+	var next *cursorState
 	if page.More {
-		cursorID, err := service.newCursor(&cursorState{
+		id, err := randomID("jc_")
+		if err != nil {
+			return ReadOutput{}, &core.AppError{Code: core.CodeInternal, Message: "cannot allocate a pagination cursor"}
+		}
+		next = &cursorState{
+			id:             id,
 			fileID:         fileID,
 			plan:           plan,
-			language:       plan.Language(),
-			expression:     plan.Expression(),
 			skip:           skip + int64(len(page.Items)),
 			maxItems:       maxItems,
 			maxResultBytes: maxResultBytes,
 			ephemeral:      ephemeral,
-		})
-		if err != nil {
-			if ephemeral {
-				_, _ = service.closeManagedHandle(fileID)
-			}
-			return ReadOutput{}, err
+			expires:        service.now().Add(service.limits.CursorTTL),
 		}
-		output.NextCursor = cursorID
-		if sizeErr := service.checkResultSize(output, maxResultBytes); sizeErr != nil {
-			service.cursorMu.Lock()
-			delete(service.cursors, cursorID)
-			service.cursorMu.Unlock()
-			if ephemeral {
-				_, _ = service.closeManagedHandle(fileID)
-			}
-			return ReadOutput{}, sizeErr
-		}
-		return output, nil
-	}
-	if ephemeral {
+		service.cleanupCursors(ctx)
+		output.NextCursor = id
+	} else if ephemeral {
 		output.FileID = ""
 	}
 	if sizeErr := service.checkResultSize(output, maxResultBytes); sizeErr != nil {
-		if ephemeral {
-			_, _ = service.closeManagedHandle(fileID)
-		}
 		return ReadOutput{}, sizeErr
 	}
-	if ephemeral {
-		_, closeErr := service.closeManagedHandle(fileID)
-		if closeErr != nil {
+	if err := service.commitPage(ctx, fileID, previous, next); err != nil {
+		return ReadOutput{}, err
+	}
+	if ephemeral && !page.More {
+		// The page is committed. Cancellation can stop waiting for cleanup,
+		// but the successful page remains the outcome of this operation.
+		_, closeErr := service.closeManagedHandleContext(ctx, fileID)
+		if closeErr != nil && !errors.Is(closeErr, context.Canceled) && !errors.Is(closeErr, context.DeadlineExceeded) {
 			return ReadOutput{}, closeErr
 		}
 	}
@@ -313,44 +336,43 @@ func (service *Service) checkResultSize(output ReadOutput, requested int64) *cor
 	if limit == 0 || limit > service.limits.MaxResultBytes {
 		limit = service.limits.MaxResultBytes
 	}
-	encoded, err := json.Marshal(output)
-	if err != nil {
-		return &core.AppError{Code: core.CodeInternal, Message: "cannot encode read result"}
-	}
-	if int64(len(encoded)) > limit {
-		return &core.AppError{Code: core.CodeResourceLimit, Message: "max_result_bytes exceeded", Limit: &core.LimitDetail{Name: "max_result_bytes", Limit: limit, Value: int64(len(encoded))}}
+	size := readResultSize(output)
+	if size > limit {
+		return &core.AppError{Code: core.CodeResourceLimit, Message: "max_result_bytes exceeded", Limit: &core.LimitDetail{Name: "max_result_bytes", Limit: limit, Value: size}}
 	}
 	return nil
 }
 
-func (service *Service) newCursor(state *cursorState) (string, *core.AppError) {
-	id, err := randomID("jc_")
-	if err != nil {
-		return "", &core.AppError{Code: core.CodeInternal, Message: "cannot allocate a pagination cursor"}
-	}
-	state.id = id
-	state.expires = service.now().Add(service.limits.CursorTTL)
-	service.cleanupCursors()
+// commitPage is the publication boundary for initial and continued reads.
+// Close and cursor replacement share the same lock order.
+func (service *Service) commitPage(ctx context.Context, fileID string, previous, next *cursorState) *core.AppError {
 	service.handleMu.Lock()
-	handleState := service.handles[state.fileID]
-	if handleState == nil || handleState.closing || handleState.active == 0 {
-		service.handleMu.Unlock()
-		return "", &core.AppError{Code: core.CodeHandleExpired, Message: "file handle is closing or no longer available"}
-	}
+	defer service.handleMu.Unlock()
 	service.cursorMu.Lock()
-	if len(service.cursors) >= service.limits.MaxCursors {
-		value := int64(len(service.cursors) + 1)
-		service.cursorMu.Unlock()
-		service.handleMu.Unlock()
-		return "", &core.AppError{Code: core.CodeResourceLimit, Message: "max_cursors exceeded", Limit: &core.LimitDetail{Name: "max_cursors", Limit: int64(service.limits.MaxCursors), Value: value}}
+	defer service.cursorMu.Unlock()
+	handleState := service.handles[fileID]
+	if handleState == nil || handleState.closing || handleState.active == 0 {
+		return &core.AppError{Code: core.CodeHandleExpired, Message: "file handle is closing or no longer available"}
 	}
-	service.cursors[id] = state
-	service.cursorMu.Unlock()
-	service.handleMu.Unlock()
-	return id, nil
+	if previous != nil && (service.cursors[previous.id] != previous || !previous.inUse) {
+		return &core.AppError{Code: core.CodeHandleExpired, Message: "pagination cursor is no longer available"}
+	}
+	if err := ctx.Err(); err != nil {
+		return core.ContextError(err, service.limits.MaxScanTime)
+	}
+	if next != nil && previous == nil && len(service.cursors) >= service.limits.MaxCursors {
+		return &core.AppError{Code: core.CodeResourceLimit, Message: "max_cursors exceeded", Limit: &core.LimitDetail{Name: "max_cursors", Limit: int64(service.limits.MaxCursors), Value: int64(len(service.cursors) + 1)}}
+	}
+	if previous != nil {
+		delete(service.cursors, previous.id)
+	}
+	if next != nil {
+		service.cursors[next.id] = next
+	}
+	return nil
 }
 
-func (service *Service) cleanupCursors() {
+func (service *Service) cleanupCursors(ctx context.Context) {
 	now := service.now()
 	service.cursorMu.Lock()
 	var ephemeralFiles []string
@@ -364,13 +386,20 @@ func (service *Service) cleanupCursors() {
 	}
 	service.cursorMu.Unlock()
 	for _, fileID := range ephemeralFiles {
-		_, _ = service.closeManagedHandle(fileID)
+		_, _ = service.closeManagedHandleContext(ctx, fileID)
 	}
 }
 
 func (service *Service) acquireScan(ctx context.Context) (func(), *core.AppError) {
+	if err := ctx.Err(); err != nil {
+		return nil, core.ContextError(err, service.limits.MaxScanTime)
+	}
 	select {
 	case service.scanSlots <- struct{}{}:
+		if err := ctx.Err(); err != nil {
+			<-service.scanSlots
+			return nil, core.ContextError(err, service.limits.MaxScanTime)
+		}
 		return func() { <-service.scanSlots }, nil
 	case <-ctx.Done():
 		if ctx.Err() == context.DeadlineExceeded {
@@ -387,22 +416,22 @@ func (service *Service) textLimit(name string, value, limit int64) *core.AppErro
 	return &core.AppError{Code: core.CodeResourceLimit, Message: name + " exceeded", Limit: &core.LimitDetail{Name: name, Limit: limit, Value: value}}
 }
 
-func (service *Service) lockCursor(id string) (*cursorState, *core.AppError) {
+func (service *Service) lockCursor(ctx context.Context, id string) (*cursorState, *core.AppError) {
 	service.cursorMu.Lock()
 	state := service.cursors[id]
+	if state != nil && state.inUse {
+		service.cursorMu.Unlock()
+		return nil, &core.AppError{Code: core.CodeInvalidArgument, Message: "pagination cursor is already in use"}
+	}
 	if state == nil || !service.now().Before(state.expires) {
 		if state != nil {
 			delete(service.cursors, id)
 		}
 		service.cursorMu.Unlock()
 		if state != nil && state.ephemeral {
-			_, _ = service.closeManagedHandle(state.fileID)
+			_, _ = service.closeManagedHandleContext(ctx, state.fileID)
 		}
 		return nil, &core.AppError{Code: core.CodeHandleExpired, Message: "pagination cursor is no longer available"}
-	}
-	if state.inUse {
-		service.cursorMu.Unlock()
-		return nil, &core.AppError{Code: core.CodeInvalidArgument, Message: "pagination cursor is already in use"}
 	}
 	state.inUse = true
 	service.cursorMu.Unlock()
@@ -423,6 +452,11 @@ func (service *Service) unlockCursor(state *cursorState, keep bool) {
 }
 
 func (service *Service) Close(ctx context.Context, input CloseInput) (CloseOutput, *core.AppError) {
+	ctx, cancel := context.WithTimeout(ctx, service.limits.MaxScanTime)
+	defer cancel()
+	if err := ctx.Err(); err != nil {
+		return CloseOutput{}, core.ContextError(err, service.limits.MaxScanTime)
+	}
 	if input.FileID == "" {
 		return CloseOutput{}, &core.AppError{Code: core.CodeInvalidArgument, Message: "file_id is required"}
 	}
@@ -459,17 +493,7 @@ func (service *Service) endHandleOperation(fileID string) {
 	service.handleMu.Unlock()
 }
 
-// closeManagedHandle marks the service-level state as closing before it
-// removes cursors or waits on the source lease. This prevents an in-flight
-// read from publishing a new cursor after close has begun.
-func (service *Service) closeManagedHandle(fileID string) (bool, *core.AppError) {
-	return service.closeManagedHandleContext(context.Background(), fileID)
-}
-
 func (service *Service) closeManagedHandleContext(ctx context.Context, fileID string) (bool, *core.AppError) {
-	if err := ctx.Err(); err != nil {
-		return false, closeContextError(err)
-	}
 	state, startClose := service.startClosing(fileID)
 	if startClose {
 		// Closing is monotonic: request cancellation stops waiting but must not
@@ -480,7 +504,7 @@ func (service *Service) closeManagedHandleContext(ctx context.Context, fileID st
 	case <-state.closeDone:
 		return state.closed, state.closeErr
 	case <-ctx.Done():
-		return false, closeContextError(ctx.Err())
+		return false, core.ContextError(ctx.Err(), service.limits.MaxScanTime)
 	}
 }
 
@@ -521,10 +545,6 @@ func (service *Service) finishClose(fileID string, state *serviceHandleState) {
 		}
 	}
 	service.handleMu.Unlock()
-}
-
-func closeContextError(_ error) *core.AppError {
-	return &core.AppError{Code: core.CodeCancelled, Message: "operation cancelled"}
 }
 
 func randomID(prefix string) (string, error) {

@@ -38,7 +38,7 @@ func TestManagerConfinesPathsAndProvidesIdempotentHandleLifecycle(t *testing.T) 
 	if opened.FileID == "" || opened.DetectedFormat != core.FormatJSON || !opened.Validation.Complete {
 		t.Fatalf("Open result = %#v", opened)
 	}
-	lease, leaseErr := manager.Acquire(opened.FileID)
+	lease, leaseErr := manager.Acquire(context.Background(), opened.FileID)
 	if leaseErr != nil {
 		t.Fatalf("Acquire error: %v", leaseErr)
 	}
@@ -55,8 +55,63 @@ func TestManagerConfinesPathsAndProvidesIdempotentHandleLifecycle(t *testing.T) 
 	if closeErr != nil || closed {
 		t.Fatalf("second CloseHandle = %v, %v, want false nil", closed, closeErr)
 	}
-	if _, acquireErr := manager.Acquire(opened.FileID); acquireErr == nil || acquireErr.Code != core.CodeHandleExpired {
+	if _, acquireErr := manager.Acquire(context.Background(), opened.FileID); acquireErr == nil || acquireErr.Code != core.CodeHandleExpired {
 		t.Fatalf("Acquire closed handle error = %#v, want HANDLE_EXPIRED", acquireErr)
+	}
+}
+
+func TestProbeRecordCapWithinByteCap(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		format      core.Format
+		data        string
+		cap         int
+		wantRecords int64
+		wantBytes   int64
+		complete    bool
+	}{
+		{"jsonl below", core.FormatJSONL, "1\n", 2, 1, 2, true},
+		{"jsonl at", core.FormatJSONL, "1\n2\n", 2, 2, 4, true},
+		{"jsonl above", core.FormatJSONL, "1\n2\n3\n", 1, 1, 2, false},
+		{"jsonl final without LF", core.FormatJSONL, "1\n2", 2, 2, 3, true},
+		{"jsonl above without LF", core.FormatJSONL, "1\n2", 1, 1, 2, false},
+		{"jsonl malformed beyond cap", core.FormatJSONL, "1\ninvalid\n", 1, 1, 2, false},
+		{"seq below", core.FormatJSONSequence, "\x1e1\n", 2, 1, 3, true},
+		{"seq at", core.FormatJSONSequence, "\x1e1\n\x1e2\n", 2, 2, 6, true},
+		{"seq above", core.FormatJSONSequence, "\x1e1\n\x1e2\n\x1e3\n", 1, 1, 3, false},
+		{"seq object without LF", core.FormatJSONSequence, "\x1e{}", 1, 1, 3, true},
+		{"seq repeated separators", core.FormatJSONSequence, "\x1e\x1e1\n\x1e\x1e", 1, 1, 6, true},
+		{"seq malformed beyond cap", core.FormatJSONSequence, "\x1e1\n\x1einvalid", 1, 1, 3, false},
+		{"seq empty", core.FormatJSONSequence, "", 1, 0, 0, true},
+		{"seq separators only", core.FormatJSONSequence, "\x1e\x1e", 1, 0, 2, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			if err := os.WriteFile(filepath.Join(root, "data"), []byte(tc.data), 0600); err != nil {
+				t.Fatal(err)
+			}
+			limits := core.DefaultLimits()
+			limits.ProbeRecords = tc.cap
+			manager, err := NewManager(root, limits, ManagerOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer manager.Shutdown()
+			opened, appErr := manager.Open(context.Background(), OpenOptions{Path: "data", Format: tc.format, Validation: core.ValidationProbe})
+			if appErr != nil {
+				t.Fatal(appErr)
+			}
+			got := opened.Validation
+			if got.RecordsExamined != tc.wantRecords || got.BytesExamined != tc.wantBytes || got.Complete != tc.complete {
+				t.Fatalf("probe=%+v, want records=%d bytes=%d complete=%v", got, tc.wantRecords, tc.wantBytes, tc.complete)
+			}
+			if !strings.Contains(tc.name, "malformed") {
+				full, err := manager.Open(context.Background(), OpenOptions{Path: "data", Format: tc.format, Validation: core.ValidationFull})
+				if err != nil || !full.Validation.Complete || full.Validation.BytesExamined != int64(len(tc.data)) {
+					t.Fatalf("full=%+v, error=%v", full, err)
+				}
+			}
+		})
 	}
 }
 
@@ -135,7 +190,7 @@ func TestManagerDetectsSourceChangesAfterOpen(t *testing.T) {
 	if err := os.WriteFile(path, []byte(`{"id":12345}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, acquireErr := manager.Acquire(opened.FileID); acquireErr == nil || acquireErr.Code != core.CodeSourceChanged {
+	if _, acquireErr := manager.Acquire(context.Background(), opened.FileID); acquireErr == nil || acquireErr.Code != core.CodeSourceChanged {
 		t.Fatalf("Acquire error = %#v, want SOURCE_CHANGED", acquireErr)
 	}
 }
@@ -164,7 +219,7 @@ func TestManagerExpiresHandlesAndEnforcesOpenLimit(t *testing.T) {
 		t.Fatalf("second Open error = %#v, want RESOURCE_LIMIT_EXCEEDED", secondErr)
 	}
 	now = now.Add(2 * time.Minute)
-	if _, acquireErr := manager.Acquire(first.FileID); acquireErr == nil || acquireErr.Code != core.CodeHandleExpired {
+	if _, acquireErr := manager.Acquire(context.Background(), first.FileID); acquireErr == nil || acquireErr.Code != core.CodeHandleExpired {
 		t.Fatalf("expired Acquire error = %#v, want HANDLE_EXPIRED", acquireErr)
 	}
 	if _, reopenErr := manager.Open(context.Background(), OpenOptions{Path: "b.json", Format: core.FormatJSON, Validation: core.ValidationProbe}); reopenErr != nil {
@@ -189,7 +244,7 @@ func TestManagerAutoDetectionIsFixedForHandle(t *testing.T) {
 	if opened.DetectedFormat != core.FormatJSONL || opened.Detection == nil || opened.Detection.Basis != "extension" {
 		t.Fatalf("Open = %#v, want jsonl extension detection", opened)
 	}
-	lease, leaseErr := manager.Acquire(opened.FileID)
+	lease, leaseErr := manager.Acquire(context.Background(), opened.FileID)
 	if leaseErr != nil {
 		t.Fatal(leaseErr)
 	}
@@ -312,6 +367,34 @@ func TestManagerProbeAcceptsFramedRecordTruncatedByProbeBoundary(t *testing.T) {
 				t.Fatalf("validation = %#v, want one complete record plus a truncated trailing record", opened.Validation)
 			}
 		})
+	}
+}
+
+func TestManagerProbeAcceptsFirstJSONLRecordTruncatedByProbeBoundary(t *testing.T) {
+	for _, probeBytes := range []int64{16, core.DefaultLimits().ProbeBytes} {
+		for _, delimiters := range [][2]string{{"{", `"x":1}`}, {"[", "1]"}} {
+			root := t.TempDir()
+			content := delimiters[0] + strings.Repeat(" ", int(probeBytes)) + delimiters[1] + "\n"
+			if err := os.WriteFile(filepath.Join(root, "data.jsonl"), []byte(content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			limits := core.DefaultLimits()
+			limits.ProbeBytes = probeBytes
+			manager, err := NewManager(root, limits, ManagerOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = manager.Shutdown() })
+			for _, mode := range []core.ValidationMode{core.ValidationFull, core.ValidationProbe} {
+				opened, openErr := manager.Open(t.Context(), OpenOptions{Path: "data.jsonl", Format: core.FormatJSONL, Validation: mode})
+				if openErr != nil {
+					t.Fatalf("probe=%d container=%q mode=%s: %v", probeBytes, delimiters[0], mode, openErr)
+				}
+				if mode == core.ValidationProbe && (opened.Validation.Complete || opened.Validation.RecordsExamined != 0 || opened.Validation.BytesExamined != probeBytes) {
+					t.Fatalf("first record probe=%#v", opened.Validation)
+				}
+			}
+		}
 	}
 }
 

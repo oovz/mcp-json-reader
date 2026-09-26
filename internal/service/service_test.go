@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/oovz/mcp-json-reader/v3/internal/core"
+	"github.com/oovz/mcp-json-reader/v3/internal/engine"
 	"github.com/oovz/mcp-json-reader/v3/internal/source"
 )
 
@@ -35,7 +36,7 @@ func TestServiceOpenReadAndIdempotentClose(t *testing.T) {
 	if closeErr != nil || closed.Closed {
 		t.Fatalf("second Close = %#v, %v, want idempotent no-op", closed, closeErr)
 	}
-	if _, acquireErr := manager.Acquire(opened.FileID); acquireErr == nil || acquireErr.Code != core.CodeHandleExpired {
+	if _, acquireErr := manager.Acquire(context.Background(), opened.FileID); acquireErr == nil || acquireErr.Code != core.CodeHandleExpired {
 		t.Fatalf("Acquire after close = %#v, want HANDLE_EXPIRED", acquireErr)
 	}
 }
@@ -129,7 +130,7 @@ func TestServiceClosePreventsAnInFlightReadFromPublishingACursor(t *testing.T) {
 	if operationErr := service.beginHandleOperation(opened.FileID); operationErr != nil {
 		t.Fatal(operationErr)
 	}
-	lease, leaseErr := manager.Acquire(opened.FileID)
+	lease, leaseErr := manager.Acquire(context.Background(), opened.FileID)
 	if leaseErr != nil {
 		t.Fatal(leaseErr)
 	}
@@ -157,9 +158,9 @@ func TestServiceClosePreventsAnInFlightReadFromPublishingACursor(t *testing.T) {
 		lease.Release()
 		t.Fatal("Close did not publish closing state before waiting for the active source lease")
 	}
-	if _, cursorErr := service.newCursor(&cursorState{fileID: opened.FileID}); cursorErr == nil || cursorErr.Code != core.CodeHandleExpired {
+	if cursorErr := service.commitPage(context.Background(), opened.FileID, nil, &cursorState{fileID: opened.FileID}); cursorErr == nil || cursorErr.Code != core.CodeHandleExpired {
 		lease.Release()
-		t.Fatalf("newCursor after close began = %#v, want HANDLE_EXPIRED", cursorErr)
+		t.Fatalf("commitPage after close began = %#v, want HANDLE_EXPIRED", cursorErr)
 	}
 	lease.Release()
 	result := <-closeDone
@@ -185,7 +186,7 @@ func TestServiceCloseReturnsOnCancellationWhileLeaseCleanupContinues(t *testing.
 	if operationErr := service.beginHandleOperation(opened.FileID); operationErr != nil {
 		t.Fatal(operationErr)
 	}
-	lease, leaseErr := manager.Acquire(opened.FileID)
+	lease, leaseErr := manager.Acquire(context.Background(), opened.FileID)
 	if leaseErr != nil {
 		service.endHandleOperation(opened.FileID)
 		t.Fatal(leaseErr)
@@ -426,6 +427,89 @@ func int64Pointer(value int64) *int64 {
 	return &value
 }
 
+func TestActiveCursorSurvivesIdleExpiry(t *testing.T) {
+	svc, manager := newTestService(t, map[string]string{"data.json": `[1,2,3]`})
+	now := time.Unix(1000, 0)
+	svc.now = func() time.Time { return now }
+	first, err := svc.Read(context.Background(), ReadInput{Path: "data.json", Language: core.QueryJSONPath, Query: "$[*]", MaxItems: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Hold the same state and lease as a continuation paused inside its scan.
+	svc.cursorMu.Lock()
+	state := svc.cursors[first.NextCursor]
+	state.inUse = true
+	now = state.expires.Add(time.Second)
+	svc.cursorMu.Unlock()
+	lease, err := manager.Acquire(context.Background(), first.FileID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan *core.AppError, 1)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	go func() { _, err := svc.Read(ctx, ReadInput{Cursor: first.NextCursor}); done <- err }()
+	select {
+	case err := <-done:
+		if err == nil || err.Code != core.CodeInvalidArgument {
+			t.Errorf("competing continuation: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Error("competing continuation waited on the active source lease")
+		lease.Release()
+		<-done
+	}
+	lease.Release()
+	svc.cursorMu.Lock()
+	retained := svc.cursors[first.NextCursor] == state
+	svc.cursorMu.Unlock()
+	if !retained {
+		t.Fatal("active cursor expired while in use")
+	}
+	svc.unlockCursor(state, true)
+	second, err := svc.Read(context.Background(), ReadInput{Cursor: first.NextCursor})
+	if err != nil || len(second.Items) != 1 || string(second.Items[0].Value) != "2" {
+		t.Fatalf("resume: %#v, %v", second, err)
+	}
+}
+
+func TestExpiredCursorCleanupHonorsRequestDeadline(t *testing.T) {
+	svc, manager := newTestService(t, map[string]string{"data.json": `[1,2,3]`})
+	first, err := svc.Read(context.Background(), ReadInput{Path: "data.json", Language: core.QueryJSONPath, Query: "$[*]", MaxItems: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease, err := manager.Acquire(context.Background(), first.FileID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc.cursorMu.Lock()
+	svc.cursors[first.NextCursor].expires = time.Time{}
+	svc.cursorMu.Unlock()
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	done := make(chan *core.AppError, 1)
+	go func() { _, err := svc.Read(ctx, ReadInput{Cursor: first.NextCursor}); done <- err }()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Error("expired cursor accepted")
+		}
+	case <-time.After(time.Second):
+		t.Error("expired cursor cleanup ignored request deadline")
+		lease.Release()
+		<-done
+	}
+	lease.Release()
+	// Closing remains monotonic and completes after the held lease drains.
+	if _, err := svc.Close(context.Background(), CloseInput{FileID: first.FileID}); err != nil {
+		t.Fatal(err)
+	}
+	if manager.ActiveHandles() != 0 {
+		t.Fatal("expired implicit source leaked")
+	}
+}
+
 func newTestService(t *testing.T, files map[string]string) (*Service, *source.Manager) {
 	t.Helper()
 	root := t.TempDir()
@@ -445,4 +529,161 @@ func newTestService(t *testing.T, files map[string]string) (*Service, *source.Ma
 	}
 	t.Cleanup(func() { _ = manager.Shutdown() })
 	return New(manager, limits, Options{}), manager
+}
+
+func firstCursorPage(t *testing.T, svc *Service, explicit bool) ReadOutput {
+	t.Helper()
+	input := ReadInput{Path: "data.json", Language: core.QueryJSONPath, Query: "$[*]", MaxItems: 1}
+	if explicit {
+		opened, err := svc.Open(context.Background(), OpenInput{Path: input.Path})
+		if err != nil {
+			t.Fatal(err)
+		}
+		input.FileID, input.Path = opened.FileID, ""
+	}
+	page, err := svc.Read(context.Background(), input)
+	if err != nil || page.NextCursor == "" {
+		t.Fatalf("first page=%+v, error=%v", page, err)
+	}
+	return page
+}
+
+func TestCancellationAtCursorPublicationPreservesRetry(t *testing.T) {
+	for _, explicit := range []bool{false, true} {
+		name := "implicit"
+		if explicit {
+			name = "explicit"
+		}
+		t.Run(name, func(t *testing.T) {
+			svc, manager := newTestService(t, map[string]string{"data.json": `[1,2,3,4]`})
+			svc.limits.MaxCursors = 1
+			first := firstCursorPage(t, svc, explicit)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			calls := 0
+			svc.now = func() time.Time {
+				calls++
+				// First call checks the old cursor's TTL. The next prepares
+				// successor expiry after the scan and source validation.
+				if calls == 2 {
+					cancel()
+				}
+				return time.Now()
+			}
+			_, err := svc.Read(ctx, ReadInput{Cursor: first.NextCursor})
+			if err == nil || err.Code != core.CodeCancelled {
+				t.Fatalf("publication cancellation=%v", err)
+			}
+			if manager.ActiveHandles() != 1 {
+				t.Error("cancelled publication closed the retry source")
+			}
+			svc.now = time.Now
+			retry, err := svc.Read(context.Background(), ReadInput{Cursor: first.NextCursor})
+			if err != nil || len(retry.Items) != 1 || string(retry.Items[0].Value) != "2" {
+				t.Fatalf("retry=%+v, error=%v", retry, err)
+			}
+		})
+	}
+}
+
+func TestCursorReplacementAtCapacity(t *testing.T) {
+	for _, explicit := range []bool{false, true} {
+		name := "implicit"
+		if explicit {
+			name = "explicit"
+		}
+		t.Run(name, func(t *testing.T) {
+			svc, _ := newTestService(t, map[string]string{"data.json": `[1,2,3,4]`})
+			svc.limits.MaxCursors = 1
+			first := firstCursorPage(t, svc, explicit)
+			cursor := first.NextCursor
+			if _, err := svc.Read(context.Background(), ReadInput{Path: "data.json", Language: core.QueryJSONPath, Query: "$[*]", MaxItems: 1}); err == nil || err.Code != core.CodeResourceLimit {
+				t.Fatalf("new cursor should exceed capacity: %v", err)
+			}
+			for _, want := range []string{"2", "3", "4"} {
+				page, err := svc.Read(context.Background(), ReadInput{Cursor: cursor})
+				if err != nil || len(page.Items) != 1 || string(page.Items[0].Value) != want {
+					t.Fatalf("page=%+v, error=%v", page, err)
+				}
+				if _, err := svc.Read(context.Background(), ReadInput{Cursor: cursor}); err == nil || err.Code != core.CodeHandleExpired {
+					t.Fatalf("old cursor not consumed: %v", err)
+				}
+				cursor = page.NextCursor
+			}
+			if cursor != "" {
+				t.Fatal("terminal page retained a cursor")
+			}
+		})
+	}
+}
+
+func TestCloseDuringCursorPublication(t *testing.T) {
+	for _, explicit := range []bool{false, true} {
+		name := "implicit"
+		if explicit {
+			name = "explicit"
+		}
+		t.Run(name, func(t *testing.T) {
+			svc, manager := newTestService(t, map[string]string{"data.json": `[1,2,3,4]`})
+			first := firstCursorPage(t, svc, explicit)
+			preparing, resume := make(chan struct{}), make(chan struct{})
+			calls := 0
+			svc.now = func() time.Time {
+				calls++
+				if calls == 2 {
+					close(preparing)
+					<-resume
+				}
+				return time.Now()
+			}
+			done := make(chan *core.AppError, 1)
+			go func() { _, err := svc.Read(context.Background(), ReadInput{Cursor: first.NextCursor}); done <- err }()
+			select {
+			case <-preparing:
+			case <-time.After(time.Second):
+				close(resume)
+				<-done
+				t.Fatal("continuation did not reach publication")
+			}
+			closed, err := svc.Close(context.Background(), CloseInput{FileID: first.FileID})
+			close(resume)
+			publicationErr := <-done
+			if err != nil || !closed.Closed {
+				t.Fatalf("close=%+v, error=%v", closed, err)
+			}
+			if publicationErr == nil || publicationErr.Code != core.CodeHandleExpired {
+				t.Fatalf("publication after close=%v", publicationErr)
+			}
+			if manager.ActiveHandles() != 0 || len(svc.cursors) != 0 {
+				t.Fatal("close left source or cursor state")
+			}
+		})
+	}
+}
+
+func TestCancelledTerminalPageDoesNotConsumeCursor(t *testing.T) {
+	svc, manager := newTestService(t, map[string]string{"data.json": `[1,2]`})
+	first := firstCursorPage(t, svc, false)
+	state, err := svc.lockCursor(context.Background(), first.NextCursor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.beginHandleOperation(first.FileID); err != nil {
+		t.Fatal(err)
+	}
+	defer svc.endHandleOperation(first.FileID)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err = svc.finishPage(ctx, state.fileID, state.plan, engine.Page{Items: []engine.Item{{Path: "/1", Value: []byte("2")}}}, state.skip, state.maxItems, state.maxResultBytes, true, state)
+	if err == nil || err.Code != core.CodeCancelled {
+		t.Fatalf("terminal publication: %v", err)
+	}
+	svc.unlockCursor(state, true)
+	if manager.ActiveHandles() != 1 {
+		t.Fatal("terminal cancellation closed retry source")
+	}
+	retry, err := svc.Read(context.Background(), ReadInput{Cursor: first.NextCursor})
+	if err != nil || !retry.Complete || len(retry.Items) != 1 || string(retry.Items[0].Value) != "2" {
+		t.Fatalf("terminal retry=%+v, error=%v", retry, err)
+	}
 }
