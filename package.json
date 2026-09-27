@@ -1,5 +1,5 @@
 {
-  "name": "@oovz/mcp-json-reader",
+  "name": "mcp-json-reader",
   "version": "3.0.0",
   "description": "A bounded-memory MCP server for querying local JSON documents",
   "license": "MIT",
@@ -37,7 +37,6 @@
     "test": "node --test cli/*.test.js"
   },
   "publishConfig": {
-    "access": "public",
     "provenance": true,
     "registry": "https://registry.npmjs.org"
   },

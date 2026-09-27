@@ -114,4 +114,4 @@ jobs:
           path: ${{ runner.temp }}/npm
       - name: Publish the tested npm package
         shell: bash
-        run: npm publish "$RUNNER_TEMP"/npm/*.tgz --access public --provenance
+        run: npm publish "$RUNNER_TEMP"/npm/*.tgz --provenance

@@ -21,13 +21,13 @@ Add that directory to your `PATH`.
 With Node.js **22.14.0 or later** and npm **11.5.1 or later**:
 
 ```sh
-npx --yes @oovz/mcp-json-reader@3 --root /workspace/data
+npx --yes mcp-json-reader@3 --root /workspace/data
 ```
 
 For a persistent npm installation:
 
 ```sh
-npm install --global @oovz/mcp-json-reader
+npm install --global mcp-json-reader
 mcp-json-reader --root /workspace/data
 ```
 
@@ -58,6 +58,19 @@ Example client configuration:
     "json-reader": {
       "command": "mcp-json-reader",
       "args": ["--root", "/workspace/data"]
+    }
+  }
+}
+```
+
+Clients that run the server through `npx` can use this configuration:
+
+```json
+{
+  "mcpServers": {
+    "json-reader": {
+      "command": "npx",
+      "args": ["--yes", "mcp-json-reader@3", "--root", "/workspace/data"]
     }
   }
 }
