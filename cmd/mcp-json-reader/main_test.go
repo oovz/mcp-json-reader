@@ -128,7 +128,7 @@ func TestV3ReleaseMetadataAndCheckoutBuildInstructions(t *testing.T) {
 		want string
 	}{
 		{path: "go.mod", want: "module github.com/oovz/mcp-json-reader/v3"},
-		{path: "package.json", want: `"version": "3.0.0"`},
+		{path: "package.json", want: `"version": "3.0.1"`},
 		{path: "package.json", want: `"name": "mcp-json-reader"`},
 		{path: filepath.Join(".github", "workflows", "release.yml"), want: "-X github.com/oovz/mcp-json-reader/v3/internal/mcpserver.Version="},
 		{path: filepath.Join(".github", "workflows", "release.yml"), want: "npm publish"},
