@@ -28,9 +28,10 @@ jobs:
           go-version-file: go.mod
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: '22.14.0'
+          node-version: '24.21.0'
           package-manager-cache: false
-      - run: npm install --global npm@11.5.1
+      - name: Show release toolchain versions
+        run: node --version && npm --version
       - name: Build native binaries and pack for npm
         shell: bash
         run: |
@@ -74,6 +75,10 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 10
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: '22.14.0'
@@ -92,6 +97,7 @@ jobs:
           npm install --offline --ignore-scripts --no-audit --no-package-lock \
             --prefix "$RUNNER_TEMP/install" "$RUNNER_TEMP"/npm/*.tgz
           npm exec --offline --prefix "$RUNNER_TEMP/install" -- mcp-json-reader --version
+          node cli/smoke-installed.js "$RUNNER_TEMP/install/node_modules/mcp-json-reader/cli/mcp-json-reader.js"
 
   publish:
     needs: [build, smoke]
@@ -104,10 +110,11 @@ jobs:
     steps:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: '22.14.0'
+          node-version: '24.21.0'
           registry-url: 'https://registry.npmjs.org'
           package-manager-cache: false
-      - run: npm install --global npm@11.5.1
+      - name: Show release toolchain versions
+        run: node --version && npm --version
       - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
           name: npm-package

@@ -40,5 +40,5 @@
     "provenance": true,
     "registry": "https://registry.npmjs.org"
   },
-  "packageManager": "npm@11.5.1"
+  "packageManager": "npm@11.19.0"
 }
