@@ -89,6 +89,103 @@ func TestServiceImplicitOpenClosesCompletedHandle(t *testing.T) {
 	}
 }
 
+func TestExpiredImplicitCursorSourcesAreReclaimedBeforeAdmission(t *testing.T) {
+	for _, entry := range []string{"open", "implicit read"} {
+		t.Run(entry, func(t *testing.T) {
+			root := t.TempDir()
+			for _, name := range []string{"first.json", "second.json"} {
+				if err := os.WriteFile(filepath.Join(root, name), []byte(`[1,2,3]`), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			now := time.Date(2026, 9, 28, 12, 0, 0, 0, time.UTC)
+			limits := core.DefaultLimits()
+			limits.MaxOpenFiles = 1
+			limits.CursorTTL = 100 * time.Millisecond
+			limits.HandleTTL = 30 * time.Second
+			manager, err := source.NewManager(root, limits, source.ManagerOptions{Now: func() time.Time { return now }})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = manager.Shutdown() })
+			svc := New(manager, limits, Options{Now: func() time.Time { return now }})
+
+			first, readErr := svc.Read(context.Background(), ReadInput{Path: "first.json", Language: core.QueryJSONPath, Query: "$[*]", MaxItems: 1})
+			if readErr != nil || first.NextCursor == "" || manager.ActiveHandles() != 1 {
+				t.Fatalf("first implicit page = %#v, %v; active handles = %d", first, readErr, manager.ActiveHandles())
+			}
+			now = now.Add(101 * time.Millisecond)
+
+			if entry == "open" {
+				if _, openErr := svc.Open(context.Background(), OpenInput{Path: "second.json", Format: core.FormatJSON}); openErr != nil {
+					t.Fatalf("Open at expired-cursor capacity: %v", openErr)
+				}
+			} else {
+				second, secondErr := svc.Read(context.Background(), ReadInput{Path: "second.json", Language: core.QueryJSONPath, Query: "$[*]", MaxItems: 1})
+				if secondErr != nil || second.NextCursor == "" {
+					t.Fatalf("implicit Read at expired-cursor capacity = %#v, %v", second, secondErr)
+				}
+			}
+			if _, cursorErr := svc.Read(context.Background(), ReadInput{Cursor: first.NextCursor}); cursorErr == nil || cursorErr.Code != core.CodeHandleExpired {
+				t.Fatalf("expired cursor error = %#v, want HANDLE_EXPIRED", cursorErr)
+			}
+		})
+	}
+}
+
+func TestCursorCleanupPreservesExplicitHandlesAndInUseCursors(t *testing.T) {
+	root := t.TempDir()
+	for _, name := range []string{"explicit.json", "implicit.json", "next.json"} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte(`[1,2,3]`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	now := time.Date(2026, 9, 28, 12, 0, 0, 0, time.UTC)
+	limits := core.DefaultLimits()
+	limits.MaxOpenFiles = 2
+	limits.CursorTTL = 100 * time.Millisecond
+	limits.HandleTTL = 30 * time.Second
+	manager, err := source.NewManager(root, limits, source.ManagerOptions{Now: func() time.Time { return now }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = manager.Shutdown() })
+	svc := New(manager, limits, Options{Now: func() time.Time { return now }})
+	explicit, openErr := svc.Open(context.Background(), OpenInput{Path: "explicit.json", Format: core.FormatJSON})
+	if openErr != nil {
+		t.Fatal(openErr)
+	}
+	first, readErr := svc.Read(context.Background(), ReadInput{Path: "implicit.json", Language: core.QueryJSONPath, Query: "$[*]", MaxItems: 1})
+	if readErr != nil || first.NextCursor == "" || manager.ActiveHandles() != 2 {
+		t.Fatalf("implicit page = %#v, %v; active handles = %d", first, readErr, manager.ActiveHandles())
+	}
+	state, cursorErr := svc.lockCursor(context.Background(), first.NextCursor)
+	if cursorErr != nil {
+		t.Fatal(cursorErr)
+	}
+	now = now.Add(101 * time.Millisecond)
+	svc.cleanupCursors(context.Background())
+	lease, stillActiveErr := manager.Acquire(context.Background(), first.FileID)
+	if stillActiveErr != nil {
+		t.Fatalf("in-use cursor source was closed: %v", stillActiveErr)
+	}
+	lease.Release()
+	svc.unlockCursor(state, true)
+	now = now.Add(101 * time.Millisecond)
+	svc.cleanupCursors(context.Background())
+	if manager.ActiveHandles() != 1 {
+		t.Fatalf("active handles after expired implicit cleanup = %d, want explicit handle only", manager.ActiveHandles())
+	}
+	lease, explicitErr := manager.Acquire(context.Background(), explicit.FileID)
+	if explicitErr != nil {
+		t.Fatalf("explicit handle was reclaimed: %v", explicitErr)
+	}
+	lease.Release()
+	if _, openErr := svc.Open(context.Background(), OpenInput{Path: "next.json", Format: core.FormatJSON}); openErr != nil {
+		t.Fatalf("Open after cleanup: %v", openErr)
+	}
+}
+
 func TestServiceImplicitCursorClosesHandleAfterSourceChange(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "data.json")

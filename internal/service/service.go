@@ -123,6 +123,10 @@ func (service *Service) Open(ctx context.Context, input OpenInput) (OpenOutput, 
 		return OpenOutput{}, acquireErr
 	}
 	defer release()
+	service.cleanupCursors(ctx)
+	if err := ctx.Err(); err != nil {
+		return OpenOutput{}, core.ContextError(err, service.limits.MaxScanTime)
+	}
 	opened, openErr := service.sources.Open(ctx, source.OpenOptions{Path: input.Path, Format: input.Format, Validation: input.Validation})
 	if openErr != nil {
 		return OpenOutput{}, openErr
@@ -176,6 +180,10 @@ func (service *Service) Read(ctx context.Context, input ReadInput) (ReadOutput, 
 	fileID := input.FileID
 	ephemeral := false
 	if input.Path != "" {
+		service.cleanupCursors(ctx)
+		if err := ctx.Err(); err != nil {
+			return ReadOutput{}, core.ContextError(err, service.limits.MaxScanTime)
+		}
 		format := input.Format
 		if format == "" {
 			format = core.FormatAuto
