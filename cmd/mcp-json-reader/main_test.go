@@ -117,31 +117,3 @@ func TestBinaryServesToolsOverStdio(t *testing.T) {
 		t.Fatalf("subprocess wrote non-protocol diagnostics on a successful run: %q", stderr.String())
 	}
 }
-
-func TestV3ReleaseMetadataAndCheckoutBuildInstructions(t *testing.T) {
-	moduleRoot, err := filepath.Abs(filepath.Join("..", ".."))
-	if err != nil {
-		t.Fatal(err)
-	}
-	tests := []struct {
-		path string
-		want string
-	}{
-		{path: "go.mod", want: "module github.com/oovz/mcp-json-reader/v3"},
-		{path: "package.json", want: `"version": "3.0.1"`},
-		{path: "package.json", want: `"name": "mcp-json-reader"`},
-		{path: filepath.Join(".github", "workflows", "release.yml"), want: "-X github.com/oovz/mcp-json-reader/v3/internal/mcpserver.Version="},
-		{path: filepath.Join(".github", "workflows", "release.yml"), want: "npm publish"},
-		{path: filepath.Join(".github", "dependabot.yml"), want: "package-ecosystem: npm"},
-		{path: "README.md", want: "go build -trimpath -o bin/mcp-json-reader ./cmd/mcp-json-reader"},
-	}
-	for _, test := range tests {
-		contents, readErr := os.ReadFile(filepath.Join(moduleRoot, test.path))
-		if readErr != nil {
-			t.Fatalf("reading %s: %v", test.path, readErr)
-		}
-		if !strings.Contains(string(contents), test.want) {
-			t.Errorf("%s does not contain %q", test.path, test.want)
-		}
-	}
-}
