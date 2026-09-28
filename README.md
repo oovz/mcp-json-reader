@@ -6,6 +6,20 @@ Queries use exact [JSON Pointer](https://www.rfc-editor.org/rfc/rfc6901.html) pa
 
 Version 3 requires an MCP 2026-07-28 client that reads structured tool results.
 
+## Version 3 migration
+
+Version 3 uses the Go module path `github.com/oovz/mcp-json-reader/v3`.
+Clients must send the required protocol metadata and use MCP 2026-07-28;
+older protocol versions are rejected. The `json_open`, `json_read`, and
+`json_close` tool names remain the same. Read values and errors from
+`structuredContent`; the server returns an empty `content` array. The
+`max-result-bytes` limit applies to the encoded `structuredContent` object,
+excluding the JSON-RPC envelope and SDK protocol metadata.
+
+See the [query profile](docs/jsonpath-profile.md) and
+[performance notes](docs/performance.md) for the current query and cursor
+contracts.
+
 ## Install
 
 With Go **1.27.1 or later**:
