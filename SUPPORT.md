@@ -1,6 +1,6 @@
 # Support
 
-The server uses Go 1.27.1 and MCP Go SDK 1.8.0. It supports MCP 2026-07-28
+The server uses Go 1.27.2 and MCP Go SDK 1.8.0. It supports MCP 2026-07-28
 over local stdio, with structured tool results and a 16 MiB inbound frame limit.
 
 | Platform | Architectures | Minimum OS |

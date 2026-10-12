@@ -12,7 +12,7 @@ Queries use exact [JSON Pointer](https://www.rfc-editor.org/rfc/rfc6901.html) pa
 
 ## Install
 
-Install with Go **1.27.1 or later**:
+Install with Go **1.27.2 or later**:
 
 ```sh
 go install github.com/oovz/mcp-json-reader/v3/cmd/mcp-json-reader@latest
@@ -34,7 +34,7 @@ mcp-json-reader --root /workspace/data
 
 Go installs the executable in `GOBIN`, or `$(go env GOPATH)/bin` by default. Add that directory to your `PATH`. The npm package includes native binaries for Linux, macOS, and Windows on amd64 and arm64; its JavaScript launcher selects the matching binary and forwards standard streams, arguments, signals, and exit status.
 
-To build this checkout with Go 1.27.1:
+To build this checkout with Go 1.27.2:
 
 ```sh
 go build -trimpath -o bin/mcp-json-reader ./cmd/mcp-json-reader
