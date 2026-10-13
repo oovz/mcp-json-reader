@@ -1,6 +1,6 @@
 {
   "name": "mcp-json-reader",
-  "version": "3.0.3",
+  "version": "3.0.4",
   "description": "A bounded-memory MCP server for querying local JSON documents",
   "license": "MIT",
   "author": {
@@ -30,6 +30,7 @@
     "LICENSE",
     "SECURITY.md",
     "SUPPORT.md",
+    "docs/tools.md",
     "docs/jsonpath-profile.md",
     "docs/performance.md"
   ],
