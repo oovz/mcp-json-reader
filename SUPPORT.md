@@ -9,11 +9,16 @@ over local stdio, with structured tool results and a 16 MiB inbound frame limit.
 | macOS | amd64, arm64 | macOS 13 |
 | Windows | amd64, arm64 | Go 1.27 supported Windows systems |
 
-Install through `go install` or npm as described in [README](README.md).
+Install a standalone release binary, through `go install`, or through npm as
+described in [README](README.md). Standalone binaries need no Go, Node.js, or
+Python runtime.
 The npm launcher requires Node.js 22.14.0 and npm 11.5.1 or later. Release CI
-tests the npm command at those versions on all six native targets.
+tests the npm command at those versions and the standalone binaries on all six
+native targets.
 
-Sources must be immutable regular files beneath the configured root.
+Sources must be immutable regular files. Access is unrestricted by default,
+subject to operating-system permissions. `--root`, `MCP_JSON_ROOT`, or a
+`--config` file with workspaces restricts source access to those directories.
 The [query profile](docs/jsonpath-profile.md) defines the supported syntax;
 [performance](docs/performance.md) explains pagination costs and resource limits.
 
