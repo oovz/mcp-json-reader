@@ -9,15 +9,16 @@ const path = require('node:path');
 const readline = require('node:readline');
 
 async function main() {
-  const launcher = process.argv[2];
-  assert.ok(launcher, 'pass the installed cli/mcp-json-reader.js path');
-  assert.ok(fs.existsSync(launcher), `installed launcher does not exist: ${launcher}`);
+  const native = process.argv[2] === '--native';
+  const executable = process.argv[native ? 3 : 2];
+  assert.ok(executable, 'pass an installed launcher path or --native BINARY');
+  assert.ok(fs.existsSync(executable), `installed executable does not exist: ${executable}`);
 
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-json-reader-smoke-'));
   const fixture = path.join(root, 'data.json');
   fs.writeFileSync(fixture, '[{"id":9007199254740993},{"id":2},{"id":3}]');
 
-  const child = spawn(process.execPath, [launcher, '--root', root], {
+  const child = spawn(native ? executable : process.execPath, native ? ['--root', root] : [executable, '--root', root], {
     stdio: ['pipe', 'pipe', 'pipe'],
     windowsHide: true,
   });

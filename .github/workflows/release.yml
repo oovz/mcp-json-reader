@@ -1,4 +1,4 @@
-name: Release npm package
+name: Release packages and binaries
 
 on:
   push:
@@ -53,6 +53,23 @@ jobs:
           name: npm-package
           path: ${{ runner.temp }}/npm/*.tgz
           if-no-files-found: error
+      - name: Prepare standalone binaries and checksums
+        shell: bash
+        run: |
+          version="$(node -p 'require("./package.json").version')"
+          mkdir -p "$RUNNER_TEMP/native"
+          while read -r goos goarch directory file; do
+            binary="$RUNNER_TEMP/native/mcp-json-reader_${version}_${goos}_${goarch}"
+            if [[ "$goos" == windows ]]; then binary+=.exe; fi
+            cp "cli/binaries/$directory/$file" "$binary"
+          done < "$RUNNER_TEMP/targets"
+          cp LICENSE "$RUNNER_TEMP/native/LICENSE"
+          (cd "$RUNNER_TEMP/native" && sha256sum mcp-json-reader_* LICENSE > SHA256SUMS)
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: native-binaries
+          path: ${{ runner.temp }}/native/*
+          if-no-files-found: error
 
   smoke:
     needs: build
@@ -98,6 +115,27 @@ jobs:
             --prefix "$RUNNER_TEMP/install" "$RUNNER_TEMP"/npm/*.tgz
           npm exec --offline --prefix "$RUNNER_TEMP/install" -- mcp-json-reader --version
           node cli/smoke-installed.js "$RUNNER_TEMP/install/node_modules/mcp-json-reader/cli/mcp-json-reader.js"
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: native-binaries
+          path: ${{ runner.temp }}/native
+      - name: Test the standalone binary
+        shell: bash
+        run: |
+          version="$(node -p 'require("./package.json").version')"
+          read -r goos goarch < <(node -e 'const t = require("./cli/targets.js").targetFor(process.platform, process.arch); console.log(t.goos, t.goarch)')
+          export NATIVE_BINARY="$RUNNER_TEMP/native/mcp-json-reader_${version}_${goos}_${goarch}"
+          if [[ "$RUNNER_OS" == Windows ]]; then NATIVE_BINARY+=.exe; fi
+          node -e '
+            const fs = require("node:fs"), path = require("node:path"), crypto = require("node:crypto"), assert = require("node:assert/strict");
+            const binary = process.env.NATIVE_BINARY;
+            const line = fs.readFileSync(path.join(path.dirname(binary), "SHA256SUMS"), "utf8").split("\n").find(line => line.endsWith("  " + path.basename(binary)));
+            assert.ok(line, "binary checksum is missing");
+            assert.equal(crypto.createHash("sha256").update(fs.readFileSync(binary)).digest("hex"), line.split("  ")[0]);
+          '
+          if [[ "$RUNNER_OS" != Windows ]]; then chmod +x "$NATIVE_BINARY"; fi
+          "$NATIVE_BINARY" --version
+          node cli/smoke-installed.js --native "$NATIVE_BINARY"
 
   publish:
     needs: [build, smoke]
@@ -134,7 +172,12 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-      - name: Create GitHub Release with commits since the previous version tag
+          persist-credentials: false
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: native-binaries
+          path: ${{ runner.temp }}/native
+      - name: Create GitHub Release with commits since the previous published release
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
@@ -142,10 +185,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          previous_tag="$(git describe --tags --match='v[0-9]*.[0-9]*.[0-9]*' --abbrev=0 "${TAG}^" 2>/dev/null || true)"
+          previous_tag="$(gh release list --exclude-drafts --limit 1 --json tagName --jq '.[0].tagName // empty')"
           notes_file="$RUNNER_TEMP/release-notes.md"
           if [[ -n "$previous_tag" ]]; then
-            printf 'Commits since %s:\n\n' "$previous_tag" > "$notes_file"
+            printf '[Compare %s...%s](%s/%s/compare/%s...%s)\n\nCommits since %s:\n\n' \
+              "$previous_tag" "$TAG" "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" \
+              "$previous_tag" "$TAG" "$previous_tag" > "$notes_file"
             git log --reverse \
               --format="- [%h]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/commit/%H) %s" \
               "$previous_tag..$TAG" >> "$notes_file"
@@ -155,7 +200,5 @@ jobs:
               --format="- [%h]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/commit/%H) %s" \
               "$TAG" >> "$notes_file"
           fi
-          if [[ "$(wc -l < "$notes_file")" -le 2 ]]; then
-            printf 'No commits found.\n' >> "$notes_file"
-          fi
-          gh release create "$TAG" --title "$TAG" --notes-file "$notes_file"
+          gh release create "$TAG" --verify-tag --title "$TAG" --notes-file "$notes_file" \
+            "$RUNNER_TEMP"/native/mcp-json-reader_* "$RUNNER_TEMP/native/SHA256SUMS" "$RUNNER_TEMP/native/LICENSE"
