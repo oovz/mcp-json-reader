@@ -32,7 +32,7 @@ func TestServiceDeadlineIncludesScanAdmission(t *testing.T) {
 	limits := core.DefaultLimits()
 	limits.MaxScanTime = 20 * time.Millisecond
 	limits.MaxConcurrentScans = 1
-	manager, err := source.NewManager(t.TempDir(), limits, source.ManagerOptions{})
+	manager, err := source.NewManager([]string{t.TempDir()}, limits, source.ManagerOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -56,7 +56,7 @@ func TestReadRespectsCompleteStructuredResultBudget(t *testing.T) {
 		t.Fatal(err)
 	}
 	limits := core.DefaultLimits()
-	manager, err := source.NewManager(root, limits, source.ManagerOptions{})
+	manager, err := source.NewManager([]string{root}, limits, source.ManagerOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}

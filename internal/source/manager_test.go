@@ -22,7 +22,7 @@ func TestManagerConfinesPathsAndProvidesIdempotentHandleLifecycle(t *testing.T) 
 	}
 	t.Cleanup(func() { _ = os.Remove(outside) })
 
-	manager, err := NewManager(root, core.DefaultLimits(), ManagerOptions{})
+	manager, err := NewManager([]string{root}, core.DefaultLimits(), ManagerOptions{})
 	if err != nil {
 		t.Fatalf("NewManager error: %v", err)
 	}
@@ -92,7 +92,7 @@ func TestProbeRecordCapWithinByteCap(t *testing.T) {
 			}
 			limits := core.DefaultLimits()
 			limits.ProbeRecords = tc.cap
-			manager, err := NewManager(root, limits, ManagerOptions{})
+			manager, err := NewManager([]string{root}, limits, ManagerOptions{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -120,7 +120,7 @@ func TestManagerClassifiesRejectedAndInvalidSources(t *testing.T) {
 	if err := os.Mkdir(filepath.Join(root, "directory"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	manager, err := NewManager(root, core.DefaultLimits(), ManagerOptions{})
+	manager, err := NewManager([]string{root}, core.DefaultLimits(), ManagerOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -159,7 +159,7 @@ func TestManagerRejectsSymlinkEscapes(t *testing.T) {
 		t.Skipf("creating directory symlinks is unavailable in this environment: %v", err)
 	}
 
-	manager, err := NewManager(root, core.DefaultLimits(), ManagerOptions{})
+	manager, err := NewManager([]string{root}, core.DefaultLimits(), ManagerOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -178,7 +178,7 @@ func TestManagerDetectsSourceChangesAfterOpen(t *testing.T) {
 	if err := os.WriteFile(path, []byte(`{"id":1}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	manager, err := NewManager(root, core.DefaultLimits(), ManagerOptions{})
+	manager, err := NewManager([]string{root}, core.DefaultLimits(), ManagerOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -206,7 +206,7 @@ func TestManagerExpiresHandlesAndEnforcesOpenLimit(t *testing.T) {
 	limits := core.DefaultLimits()
 	limits.MaxOpenFiles = 1
 	limits.HandleTTL = time.Minute
-	manager, err := NewManager(root, limits, ManagerOptions{Now: func() time.Time { return now }})
+	manager, err := NewManager([]string{root}, limits, ManagerOptions{Now: func() time.Time { return now }})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -232,7 +232,7 @@ func TestManagerAutoDetectionIsFixedForHandle(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "data.ndjson"), []byte("{\"id\":1}\n{\"id\":2}\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	manager, err := NewManager(root, core.DefaultLimits(), ManagerOptions{})
+	manager, err := NewManager([]string{root}, core.DefaultLimits(), ManagerOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -272,7 +272,7 @@ func TestManagerProbeRejectsDecidableSyntaxErrorsBeforeAnyCompleteRecord(t *test
 			}
 			limits := core.DefaultLimits()
 			limits.ProbeBytes = 16
-			manager, err := NewManager(root, limits, ManagerOptions{})
+			manager, err := NewManager([]string{root}, limits, ManagerOptions{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -292,7 +292,7 @@ func TestManagerProbeAcceptsAValidValueTruncatedByProbeBoundary(t *testing.T) {
 	}
 	limits := core.DefaultLimits()
 	limits.ProbeBytes = 16
-	manager, err := NewManager(root, limits, ManagerOptions{})
+	manager, err := NewManager([]string{root}, limits, ManagerOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -323,7 +323,7 @@ func TestManagerProbeRejectsIncompleteJSONInDelimiterTerminatedRecords(t *testin
 			}
 			limits := core.DefaultLimits()
 			limits.ProbeBytes = 16
-			manager, err := NewManager(root, limits, ManagerOptions{})
+			manager, err := NewManager([]string{root}, limits, ManagerOptions{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -353,7 +353,7 @@ func TestManagerProbeAcceptsFramedRecordTruncatedByProbeBoundary(t *testing.T) {
 			}
 			limits := core.DefaultLimits()
 			limits.ProbeBytes = 16
-			manager, err := NewManager(root, limits, ManagerOptions{})
+			manager, err := NewManager([]string{root}, limits, ManagerOptions{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -380,7 +380,7 @@ func TestManagerProbeAcceptsFirstJSONLRecordTruncatedByProbeBoundary(t *testing.
 			}
 			limits := core.DefaultLimits()
 			limits.ProbeBytes = probeBytes
-			manager, err := NewManager(root, limits, ManagerOptions{})
+			manager, err := NewManager([]string{root}, limits, ManagerOptions{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -407,7 +407,7 @@ func TestManagerProbeDoesNotDiscardDefinitelyInvalidUTF8AtBoundary(t *testing.T)
 	}
 	limits := core.DefaultLimits()
 	limits.ProbeBytes = 16
-	manager, err := NewManager(root, limits, ManagerOptions{})
+	manager, err := NewManager([]string{root}, limits, ManagerOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}

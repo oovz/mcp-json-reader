@@ -103,7 +103,7 @@ func TestExpiredImplicitCursorSourcesAreReclaimedBeforeAdmission(t *testing.T) {
 			limits.MaxOpenFiles = 1
 			limits.CursorTTL = 100 * time.Millisecond
 			limits.HandleTTL = 30 * time.Second
-			manager, err := source.NewManager(root, limits, source.ManagerOptions{Now: func() time.Time { return now }})
+			manager, err := source.NewManager([]string{root}, limits, source.ManagerOptions{Now: func() time.Time { return now }})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -145,7 +145,7 @@ func TestCursorCleanupPreservesExplicitHandlesAndInUseCursors(t *testing.T) {
 	limits.MaxOpenFiles = 2
 	limits.CursorTTL = 100 * time.Millisecond
 	limits.HandleTTL = 30 * time.Second
-	manager, err := source.NewManager(root, limits, source.ManagerOptions{Now: func() time.Time { return now }})
+	manager, err := source.NewManager([]string{root}, limits, source.ManagerOptions{Now: func() time.Time { return now }})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -193,7 +193,7 @@ func TestServiceImplicitCursorClosesHandleAfterSourceChange(t *testing.T) {
 		t.Fatal(err)
 	}
 	limits := core.DefaultLimits()
-	manager, err := source.NewManager(root, limits, source.ManagerOptions{})
+	manager, err := source.NewManager([]string{root}, limits, source.ManagerOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -359,7 +359,7 @@ func TestServiceDoesNotRetainIdleHandleCoordinationState(t *testing.T) {
 	limits := core.DefaultLimits()
 	limits.MaxOpenFiles = 1
 	limits.HandleTTL = time.Minute
-	manager, err := source.NewManager(root, limits, source.ManagerOptions{Now: func() time.Time { return now }})
+	manager, err := source.NewManager([]string{root}, limits, source.ManagerOptions{Now: func() time.Time { return now }})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -411,7 +411,7 @@ func TestServiceBoundsQueryPathAndStoredCursorState(t *testing.T) {
 	limits.MaxQueryBytes = 4
 	limits.MaxPathBytes = 16
 	limits.MaxCursors = 1
-	manager, err := source.NewManager(root, limits, source.ManagerOptions{})
+	manager, err := source.NewManager([]string{root}, limits, source.ManagerOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -488,7 +488,7 @@ func TestServiceReportsMalformedDataFoundAfterProbeValidation(t *testing.T) {
 			limits := core.DefaultLimits()
 			limits.ProbeBytes = test.probeBytes
 			limits.ProbeRecords = 1
-			manager, err := source.NewManager(root, limits, source.ManagerOptions{})
+			manager, err := source.NewManager([]string{root}, limits, source.ManagerOptions{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -620,7 +620,7 @@ func newTestService(t *testing.T, files map[string]string) (*Service, *source.Ma
 		}
 	}
 	limits := core.DefaultLimits()
-	manager, err := source.NewManager(root, limits, source.ManagerOptions{})
+	manager, err := source.NewManager([]string{root}, limits, source.ManagerOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}

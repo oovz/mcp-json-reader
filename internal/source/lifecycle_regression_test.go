@@ -18,7 +18,7 @@ func TestLeaseDetectsMutationAfterReadingBeforePublication(t *testing.T) {
 	if err := os.WriteFile(path, []byte(`{"x":1}`), 0600); err != nil {
 		t.Fatal(err)
 	}
-	manager, err := NewManager(root, core.DefaultLimits(), ManagerOptions{})
+	manager, err := NewManager([]string{root}, core.DefaultLimits(), ManagerOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -59,7 +59,7 @@ func TestBusyLeaseDoesNotBlockAcquisitionOrExpiryCleanup(t *testing.T) {
 	now := time.Unix(1000, 0)
 	limits := core.DefaultLimits()
 	limits.HandleTTL = time.Second
-	manager, err := NewManager(root, limits, ManagerOptions{Now: func() time.Time { return now }})
+	manager, err := NewManager([]string{root}, limits, ManagerOptions{Now: func() time.Time { return now }})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -99,7 +99,7 @@ func TestConcurrentOpenLimitDetailsAreRaceFree(t *testing.T) {
 	}
 	limits := core.DefaultLimits()
 	limits.MaxOpenFiles = 1
-	manager, err := NewManager(root, limits, ManagerOptions{})
+	manager, err := NewManager([]string{root}, limits, ManagerOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}

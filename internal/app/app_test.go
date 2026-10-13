@@ -9,9 +9,10 @@ import (
 	"testing"
 )
 
-func TestParseConfigRequiresRootAndAcceptsEnvironmentDefault(t *testing.T) {
-	if _, err := ParseConfig(nil, func(string) string { return "" }); err == nil {
-		t.Fatal("ParseConfig succeeded without --root or MCP_JSON_ROOT")
+func TestParseConfigDefaultsToGlobalAndAcceptsEnvironmentRoot(t *testing.T) {
+	global, err := ParseConfig(nil, func(string) string { return "" })
+	if err != nil || len(global.Workspaces) != 0 {
+		t.Fatalf("global config = %#v, %v", global, err)
 	}
 	config, err := ParseConfig([]string{"--max-depth", "64"}, func(name string) string {
 		if name == "MCP_JSON_ROOT" {
@@ -22,7 +23,7 @@ func TestParseConfigRequiresRootAndAcceptsEnvironmentDefault(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseConfig error: %v", err)
 	}
-	if config.Root != `C:\workspace\data` || config.Limits.MaxDepth != 64 {
+	if len(config.Workspaces) != 1 || config.Workspaces[0] != `C:\workspace\data` || config.Limits.MaxDepth != 64 {
 		t.Fatalf("config = %#v", config)
 	}
 }
@@ -110,14 +111,14 @@ func TestParseConfigRootFlagOverridesEnvironment(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if config.Root != "flag-root" {
-		t.Fatalf("root = %q, want explicit flag to override environment", config.Root)
+	if len(config.Workspaces) != 1 || config.Workspaces[0] != "flag-root" {
+		t.Fatalf("workspaces = %q, want explicit flag to override environment", config.Workspaces)
 	}
 }
 
 func TestRunReportsConfigurationErrorsWithoutWritingProtocolOutput(t *testing.T) {
 	for _, args := range [][]string{
-		nil,
+		{"--root", ""},
 		{"--root", ".", "unexpected"},
 		{"--root", ".", "--max-items", "0"},
 		{"--unknown"},
@@ -149,7 +150,7 @@ func TestRunReportsRootOpenFailure(t *testing.T) {
 	if stdout.Len() != 0 {
 		t.Fatalf("stdout = %q, want empty protocol stream", stdout.String())
 	}
-	if !strings.Contains(stderr.String(), "cannot open root") {
-		t.Fatalf("stderr = %q, want root-open diagnostic", stderr.String())
+	if !strings.Contains(stderr.String(), "cannot open workspace") {
+		t.Fatalf("stderr = %q, want workspace-open diagnostic", stderr.String())
 	}
 }

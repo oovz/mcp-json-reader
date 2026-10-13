@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -20,21 +21,7 @@ func TestBinaryServesToolsOverStdio(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "data.json"), []byte(`{"orders":[{"id":1},{"id":2}]}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	moduleRoot, err := filepath.Abs(filepath.Join("..", ".."))
-	if err != nil {
-		t.Fatal(err)
-	}
-	executable := filepath.Join(t.TempDir(), "mcp-json-reader")
-	if runtime.GOOS == "windows" {
-		executable += ".exe"
-	}
-	buildContext, cancelBuild := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancelBuild()
-	build := exec.CommandContext(buildContext, "go", "build", "-trimpath", "-o", executable, "./cmd/mcp-json-reader")
-	build.Dir = moduleRoot
-	if output, buildErr := build.CombinedOutput(); buildErr != nil {
-		t.Fatalf("building binary: %v\n%s", buildErr, output)
-	}
+	executable := buildServerBinary(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
@@ -115,5 +102,81 @@ func TestBinaryServesToolsOverStdio(t *testing.T) {
 	closed = true
 	if stderr.Len() != 0 {
 		t.Fatalf("subprocess wrote non-protocol diagnostics on a successful run: %q", stderr.String())
+	}
+}
+
+func buildServerBinary(t *testing.T) string {
+	t.Helper()
+	moduleRoot, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	executable := filepath.Join(t.TempDir(), "mcp-json-reader")
+	if runtime.GOOS == "windows" {
+		executable += ".exe"
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	build := exec.CommandContext(ctx, "go", "build", "-trimpath", "-o", executable, "./cmd/mcp-json-reader")
+	build.Dir = moduleRoot
+	if output, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("building binary: %v\n%s", err, output)
+	}
+	return executable
+}
+
+func TestBinaryGlobalAndConfiguredWorkspaceAccess(t *testing.T) {
+	t.Setenv("MCP_JSON_ROOT", "")
+	executable := buildServerBinary(t)
+	first, second, outside := t.TempDir(), t.TempDir(), t.TempDir()
+	for _, directory := range []string{first, second, outside} {
+		if err := os.WriteFile(filepath.Join(directory, "data.json"), []byte(`{"id":1}`), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	configPath := filepath.Join(t.TempDir(), "workspaces.json")
+	config, err := json.Marshal(map[string]any{"workspaces": []string{first, second}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, config, 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, restricted := range []bool{false, true} {
+		name := "global"
+		var args []string
+		if restricted {
+			name, args = "workspaces", []string{"--config", configPath}
+		}
+		t.Run(name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer cancel()
+			command := exec.Command(executable, args...)
+			command.Dir = t.TempDir()
+			var stderr bytes.Buffer
+			command.Stderr = &stderr
+			client := mcp.NewClient(&mcp.Implementation{Name: "workspace-test", Version: "1.0.0"}, nil)
+			session, err := client.Connect(ctx, &mcp.CommandTransport{Command: command, TerminateDuration: 2 * time.Second}, nil)
+			if err != nil {
+				t.Fatalf("connect: %v; stderr: %s", err, stderr.String())
+			}
+			defer func() { _ = session.Close() }()
+			for _, directory := range []string{first, second, outside} {
+				result, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "json_read", Arguments: map[string]any{
+					"path": filepath.Join(directory, "data.json"), "language": "pointer", "query": "/id",
+				}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if restricted && directory == outside {
+					content, ok := result.StructuredContent.(map[string]any)
+					if !result.IsError || !ok || content["code"] != "ACCESS_DENIED" {
+						t.Fatalf("outside read = %#v", result)
+					}
+				} else if result.IsError {
+					t.Fatalf("allowed read = %#v", result)
+				}
+			}
+		})
 	}
 }

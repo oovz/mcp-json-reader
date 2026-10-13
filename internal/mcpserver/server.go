@@ -215,7 +215,7 @@ func openInputSchema() map[string]any {
 		"additionalProperties": false,
 		"required":             []string{"path"},
 		"properties": map[string]any{
-			"path":   map[string]any{"type": "string", "minLength": 1, "description": "Path to a local file within the server's configured root."},
+			"path":   map[string]any{"type": "string", "minLength": 1, "description": "Local file path. Configured workspaces restrict access; multiple workspaces require an absolute path."},
 			"format": formatSchema(),
 			"validation": map[string]any{
 				"type": "string", "enum": []string{"probe", "full"}, "default": "probe",

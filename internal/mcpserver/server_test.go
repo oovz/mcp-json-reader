@@ -24,7 +24,7 @@ func TestServerListsToolsAndReturnsStructuredToolErrors(t *testing.T) {
 		t.Fatal(err)
 	}
 	limits := core.DefaultLimits()
-	manager, err := source.NewManager(root, limits, source.ManagerOptions{})
+	manager, err := source.NewManager([]string{root}, limits, source.ManagerOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}

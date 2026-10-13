@@ -16,9 +16,9 @@ import (
 )
 
 type Config struct {
-	Root    string
-	Version bool
-	Limits  core.Limits
+	Workspaces []string
+	Version    bool
+	Limits     core.Limits
 }
 
 const maxMCPFrameBytes = 16 * 1024 * 1024
@@ -32,10 +32,13 @@ func stdioTransport() *mcpserver.StdioTransport {
 
 func ParseConfig(arguments []string, getenv func(string) string) (Config, error) {
 	limits := core.DefaultLimits()
-	config := Config{Root: getenv("MCP_JSON_ROOT"), Limits: limits}
+	config := Config{Limits: limits}
+	root := getenv("MCP_JSON_ROOT")
+	var configFile string
 	flags := flag.NewFlagSet("mcp-json-reader", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
-	flags.StringVar(&config.Root, "root", config.Root, "filesystem root available to the MCP server")
+	flags.StringVar(&root, "root", root, "filesystem root available to the MCP server")
+	flags.StringVar(&configFile, "config", "", "JSON file containing allowed workspace directories")
 	flags.BoolVar(&config.Version, "version", false, "print version and exit")
 	flags.Int64Var(&config.Limits.MaxPathBytes, "max-path-bytes", limits.MaxPathBytes, "maximum encoded bytes in a source path")
 	flags.Int64Var(&config.Limits.MaxQueryBytes, "max-query-bytes", limits.MaxQueryBytes, "maximum encoded bytes in a query expression")
@@ -66,11 +69,31 @@ func ParseConfig(arguments []string, getenv func(string) string) (Config, error)
 	if config.Version {
 		return config, nil
 	}
-	if strings.TrimSpace(config.Root) == "" {
-		return Config{}, errors.New("--root or MCP_JSON_ROOT is required")
-	}
 	if err := config.Limits.Validate(); err != nil {
 		return Config{}, err
+	}
+	var explicitRoot, explicitConfig bool
+	flags.Visit(func(value *flag.Flag) {
+		explicitRoot = explicitRoot || value.Name == "root"
+		explicitConfig = explicitConfig || value.Name == "config"
+	})
+	if (explicitRoot || root != "") && strings.TrimSpace(root) == "" {
+		return Config{}, errors.New("--root or MCP_JSON_ROOT must name a directory")
+	}
+	if explicitConfig {
+		if strings.TrimSpace(configFile) == "" {
+			return Config{}, errors.New("--config must name a file")
+		}
+		if root != "" {
+			return Config{}, errors.New("--config cannot be combined with --root or MCP_JSON_ROOT")
+		}
+		workspaces, err := loadWorkspaces(configFile)
+		if err != nil {
+			return Config{}, err
+		}
+		config.Workspaces = workspaces
+	} else if root != "" {
+		config.Workspaces = []string{root}
 	}
 	return config, nil
 }
@@ -89,9 +112,9 @@ func Run(ctx context.Context, arguments []string, stdout, stderr io.Writer, gete
 		_, _ = fmt.Fprintf(stdout, "mcp-json-reader %s\n", mcpserver.CurrentVersion())
 		return 0
 	}
-	manager, err := source.NewManager(config.Root, config.Limits, source.ManagerOptions{})
+	manager, err := source.NewManager(config.Workspaces, config.Limits, source.ManagerOptions{})
 	if err != nil {
-		_, _ = fmt.Fprintln(stderr, "mcp-json-reader: cannot open root:", err)
+		_, _ = fmt.Fprintln(stderr, "mcp-json-reader: cannot open workspace:", err)
 		return 1
 	}
 	defer func() { _ = manager.Shutdown() }()
@@ -103,12 +126,16 @@ func Run(ctx context.Context, arguments []string, stdout, stderr io.Writer, gete
 	return 0
 }
 
-const usageText = `Usage: mcp-json-reader --root PATH [options]
+const usageText = `Usage: mcp-json-reader [options]
 
-The root may also be supplied with MCP_JSON_ROOT.
+Without --root, MCP_JSON_ROOT, or configured workspaces, the server can read
+any regular file permitted by the operating system. Relative paths use the
+process working directory. With one workspace, paths are relative to it;
+with multiple workspaces, source paths must be absolute.
 
 Options:
-  --root PATH                  filesystem root available to the server
+  --root PATH                  restrict access to one directory (or MCP_JSON_ROOT)
+  --config FILE                JSON configuration: {"workspaces":["/absolute/path"]}
   --version                    print version and exit
   --max-path-bytes N           maximum encoded source-path bytes
   --max-query-bytes N          maximum encoded query bytes

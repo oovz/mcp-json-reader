@@ -63,6 +63,7 @@ type handle struct {
 	mu sync.Mutex
 
 	id          string
+	root        *os.Root
 	relPath     string
 	file        *os.File
 	format      core.Format
@@ -73,38 +74,49 @@ type handle struct {
 	closed      bool
 }
 
+type workspace struct {
+	root *os.Root
+	path string
+}
+
 type Manager struct {
 	mu sync.Mutex
 
-	root     *os.Root
-	rootPath string
-	limits   core.Limits
-	now      func() time.Time
-	handles  map[string]*handle
-	closed   bool
+	workspaces []workspace
+	limits     core.Limits
+	now        func() time.Time
+	handles    map[string]*handle
+	closed     bool
 }
 
-func NewManager(rootPath string, limits core.Limits, options ManagerOptions) (*Manager, error) {
+func NewManager(paths []string, limits core.Limits, options ManagerOptions) (*Manager, error) {
 	if err := limits.Validate(); err != nil {
 		return nil, err
 	}
-	absolute, err := filepath.Abs(rootPath)
-	if err != nil {
-		return nil, err
-	}
-	absolute, err = filepath.EvalSymlinks(absolute)
-	if err != nil {
-		return nil, err
-	}
-	root, err := os.OpenRoot(absolute)
-	if err != nil {
-		return nil, err
+	var workspaces []workspace
+	for _, path := range paths {
+		absolute, err := filepath.Abs(path)
+		configuredPath := absolute
+		if err == nil {
+			absolute, err = filepath.EvalSymlinks(absolute)
+		}
+		var root *os.Root
+		if err == nil {
+			root, err = os.OpenRoot(absolute)
+		}
+		if err != nil {
+			for _, opened := range workspaces {
+				_ = opened.root.Close()
+			}
+			return nil, err
+		}
+		workspaces = append(workspaces, workspace{root: root, path: filepath.Clean(configuredPath)})
 	}
 	now := options.Now
 	if now == nil {
 		now = time.Now
 	}
-	return &Manager{root: root, rootPath: filepath.Clean(absolute), limits: limits, now: now, handles: make(map[string]*handle)}, nil
+	return &Manager{workspaces: workspaces, limits: limits, now: now, handles: make(map[string]*handle)}, nil
 }
 
 func (manager *Manager) Open(ctx context.Context, options OpenOptions) (OpenInfo, *core.AppError) {
@@ -128,7 +140,7 @@ func (manager *Manager) Open(ctx context.Context, options OpenOptions) (OpenInfo
 		return OpenInfo{}, err
 	}
 
-	relPath, pathErr := manager.relativePath(options.Path)
+	root, relPath, pathErr := manager.resolvePath(options.Path)
 	if pathErr != nil {
 		return OpenInfo{}, pathErr
 	}
@@ -144,7 +156,7 @@ func (manager *Manager) Open(ctx context.Context, options OpenOptions) (OpenInfo
 	}
 	manager.mu.Unlock()
 
-	file, openErr := openConfined(manager.root, relPath)
+	file, openErr := openSource(root, relPath)
 	if openErr != nil {
 		return OpenInfo{}, manager.openError(openErr)
 	}
@@ -185,7 +197,7 @@ func (manager *Manager) Open(ctx context.Context, options OpenOptions) (OpenInfo
 		return OpenInfo{}, &core.AppError{Code: core.CodeIO, Message: "cannot rewind requested source"}
 	}
 	finalInfo, finalStatErr := file.Stat()
-	pathInfo, pathStatErr := manager.root.Stat(relPath)
+	pathInfo, pathStatErr := statSource(root, relPath)
 	if finalStatErr != nil || pathStatErr != nil || !os.SameFile(info, pathInfo) || fingerprintOf(finalInfo) != fingerprintOf(info) || fingerprintOf(pathInfo) != fingerprintOf(info) {
 		return OpenInfo{}, &core.AppError{Code: core.CodeSourceChanged, Message: "source changed while it was being opened"}
 	}
@@ -198,6 +210,7 @@ func (manager *Manager) Open(ctx context.Context, options OpenOptions) (OpenInfo
 	}
 	opened := &handle{
 		id:          id,
+		root:        root,
 		relPath:     relPath,
 		file:        file,
 		format:      selectedFormat,
@@ -436,25 +449,61 @@ func readPrefix(file *os.File, size, limit int64) ([]byte, *core.AppError) {
 	return buffer[:count], nil
 }
 
-func (manager *Manager) relativePath(requested string) (string, *core.AppError) {
+func (manager *Manager) resolvePath(requested string) (*os.Root, string, *core.AppError) {
 	if strings.TrimSpace(requested) == "" {
-		return "", &core.AppError{Code: core.CodeInvalidArgument, Message: "path is required"}
+		return nil, "", &core.AppError{Code: core.CodeInvalidArgument, Message: "path is required"}
 	}
 	path := filepath.FromSlash(requested)
-	var relative string
-	if filepath.IsAbs(path) {
-		var err error
-		relative, err = filepath.Rel(manager.rootPath, filepath.Clean(path))
+	if len(manager.workspaces) == 0 {
+		absolute, err := filepath.Abs(path)
 		if err != nil {
-			return "", &core.AppError{Code: core.CodeAccessDenied, Message: "requested path is outside the configured root"}
+			return nil, "", &core.AppError{Code: core.CodeIO, Message: "cannot resolve source path", Cause: err}
 		}
-	} else {
-		relative = filepath.Clean(path)
+		return nil, absolute, nil
 	}
+	if filepath.IsAbs(path) {
+		var selected *os.Root
+		var selectedPath string
+		longestBase := -1
+		for _, workspace := range manager.workspaces {
+			// Accept both the configured spelling and its resolved directory path.
+			// The descriptor still confines every open and symlink resolution.
+			for _, base := range []string{workspace.path, workspace.root.Name()} {
+				relative, err := filepath.Rel(base, filepath.Clean(path))
+				if err == nil && filepath.IsLocal(relative) && len(base) > longestBase {
+					selected, selectedPath, longestBase = workspace.root, relative, len(base)
+				}
+			}
+		}
+		if selected != nil {
+			// Overlapping workspaces share the containing directory's boundary.
+			// Map aliases first so separately configured symlink roots keep access.
+			resolved := filepath.Join(selected.Name(), selectedPath)
+			for _, workspace := range manager.workspaces {
+				relative, err := filepath.Rel(workspace.root.Name(), resolved)
+				if err == nil && filepath.IsLocal(relative) && len(workspace.root.Name()) < len(selected.Name()) {
+					selected, selectedPath = workspace.root, relative
+				}
+			}
+			return selected, selectedPath, nil
+		}
+		return nil, "", &core.AppError{Code: core.CodeAccessDenied, Message: "requested path is outside the configured workspaces"}
+	}
+	if len(manager.workspaces) != 1 {
+		return nil, "", &core.AppError{Code: core.CodeInvalidArgument, Message: "source path must be absolute when multiple workspaces are configured"}
+	}
+	relative := filepath.Clean(path)
 	if !filepath.IsLocal(relative) {
-		return "", &core.AppError{Code: core.CodeAccessDenied, Message: "requested path is outside the configured root"}
+		return nil, "", &core.AppError{Code: core.CodeAccessDenied, Message: "requested path is outside the configured workspace"}
 	}
-	return relative, nil
+	return manager.workspaces[0].root, relative, nil
+}
+
+func statSource(root *os.Root, name string) (os.FileInfo, error) {
+	if root == nil {
+		return os.Stat(name)
+	}
+	return root.Stat(name)
 }
 
 func (manager *Manager) openError(err error) *core.AppError {
@@ -463,7 +512,7 @@ func (manager *Manager) openError(err error) *core.AppError {
 	}
 	// os.Root does not export a path-escape sentinel. Treat an unsuccessful
 	// confined open as an access refusal rather than inspecting error text.
-	return &core.AppError{Code: core.CodeAccessDenied, Message: "requested path cannot be opened within the configured root", Cause: err}
+	return &core.AppError{Code: core.CodeAccessDenied, Message: "requested path cannot be opened under the configured file access policy", Cause: err}
 }
 
 type Lease struct {
@@ -528,7 +577,7 @@ func (lease *Lease) Validate() *core.AppError {
 	}
 	handle := lease.handle
 	fileInfo, fileErr := handle.file.Stat()
-	pathInfo, pathErr := lease.manager.root.Stat(handle.relPath)
+	pathInfo, pathErr := statSource(handle.root, handle.relPath)
 	if fileErr == nil && pathErr == nil && !handle.closed && os.SameFile(handle.original, fileInfo) && os.SameFile(handle.original, pathInfo) && fingerprintOf(fileInfo) == handle.fingerprint && fingerprintOf(pathInfo) == handle.fingerprint {
 		return nil
 	}
@@ -637,8 +686,10 @@ func (manager *Manager) Shutdown() error {
 		}
 		handle.mu.Unlock()
 	}
-	if err := manager.root.Close(); err != nil && firstErr == nil {
-		firstErr = err
+	for _, workspace := range manager.workspaces {
+		if err := workspace.root.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
 	}
 	return firstErr
 }
