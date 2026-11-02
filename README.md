@@ -103,7 +103,7 @@ The package includes binaries for Linux, macOS, and Windows on amd64 and arm64. 
 
 ### Go
 
-Use Go **1.27.2 or later**:
+Use Go **1.27.3 or later**:
 
 ```sh
 go install github.com/oovz/mcp-json-reader/v3/cmd/mcp-json-reader@latest
