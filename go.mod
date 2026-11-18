@@ -1,6 +1,6 @@
 module github.com/oovz/mcp-json-reader/v3
 
-go 1.27.3
+go 1.27.4
 
 require (
 	github.com/google/jsonschema-go v0.4.3
